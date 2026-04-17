@@ -58,6 +58,30 @@ Not a good fit:
 </dependencies>
 ```
 
+### Maven (GitHub Packages)
+
+Then use the GitHub Packages repository:
+
+```xml
+<repositories>
+    <repository>
+        <id>github</id>
+        <url>https://maven.pkg.github.com/vadimkrut/aeron-rpc-pyc</url>
+        <snapshots>
+            <enabled>true</enabled>
+        </snapshots>
+    </repository>
+</repositories>
+
+<dependencies>
+    <dependency>
+        <groupId>ru.pathcreator.pyc</groupId>
+        <artifactId>aeron-rpc</artifactId>
+        <version>1.0.2-SNAPSHOT</version>
+    </dependency>
+</dependencies>
+```
+
 ---
 
 ## Requirements
@@ -116,7 +140,7 @@ mvn -version
 If Maven prints an older Java version on Windows PowerShell, set `JAVA_HOME` for the current terminal:
 
 ```powershell
-$env:JAVA_HOME = "C:\Users\User\.jdks\openjdk-ea-25+36-3489"
+$env:JAVA_HOME = "...\.jdks\openjdk-ea-25+36-3489"
 $env:Path = "$env:JAVA_HOME\bin;$env:Path"
 mvn -version
 ```
