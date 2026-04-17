@@ -5,7 +5,6 @@ import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
 import org.agrona.CloseHelper;
 import org.agrona.concurrent.BackoffIdleStrategy;
-import org.agrona.concurrent.BusySpinIdleStrategy;
 
 import java.io.File;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -56,16 +55,26 @@ public final class RpcNode implements AutoCloseable {
         final MediaDriver driver;
         final String aeronDirName;
         if (config.embeddedDriver()) {
+            // ThreadingMode.SHARED: все компоненты MediaDriver-а (sender,
+            // receiver, conductor) в ОДНОМ треде. Против DEDICATED экономим
+            // 2 ядра CPU на процесс. Latency чуть выше (один тред обрабатывает
+            // и send и receive), но для RPC с локального хоста разница в
+            // единицах микросекунд. В реальной сетке это всё равно перекроет
+            // сам network round-trip.
+            //
+            // Если нужен абсолютный минимум latency — поменяйте на DEDICATED.
             final MediaDriver.Context driverCtx = new MediaDriver.Context()
                     .aeronDirectoryName(config.aeronDir())
                     .dirDeleteOnStart(true)
                     .dirDeleteOnShutdown(true)
-                    .threadingMode(ThreadingMode.DEDICATED)
+                    .threadingMode(ThreadingMode.SHARED)
                     .termBufferSparseFile(true)
-                    .conductorIdleStrategy(new BackoffIdleStrategy(10, 20, 1, 1000))
-                    .sharedIdleStrategy(new BackoffIdleStrategy(10, 20, 1, 1000))
-                    .senderIdleStrategy(new BusySpinIdleStrategy())
-                    .receiverIdleStrategy(new BusySpinIdleStrategy())
+                    // sharedIdleStrategy используется в SHARED mode.
+                    // BackoffIdleStrategy с min=1ns, max=1ms — стандарт Aeron.
+                    .sharedIdleStrategy(new BackoffIdleStrategy(
+                            100, 10,
+                            1L,
+                            1_000_000L))
                     .useWindowsHighResTimer(true)
                     .warnIfDirectoryExists(true);
             driver = MediaDriver.launchEmbedded(driverCtx);

@@ -1,56 +1,32 @@
 package ru.pathcreator.pyc;
 
 /**
- * Политика для ситуаций, когда TX-очередь / publication перегружены.
- * <p>
- * Применяется в двух местах:
- * (a) когда caller пытается положить сообщение в sender queue, а она full;
- * (b) когда sender-тред делает publication.offer() и получает BACK_PRESSURED
- * дольше allowed offer-timeout.
- * <p>
- * Для синхронного RPC с семантикой request-response практически полезны
- * только два значения: {@link #BLOCK} и {@link #FAIL_FAST}. Оставшиеся два
- * сохранены ради полноты и на случай one-way / fire-and-forget использования.
+ * Что делать когда Aeron publication возвращает BACK_PRESSURED дольше
+ * {@code offerTimeout}.
+ *
+ * <p>Упрощён до двух значений (убраны DROP_NEW / DROP_OLDEST). Для RPC
+ * запрос/ответ они почти всегда вредны: caller ждёт ответа — если мы
+ * "молча дропнем" или "вытесним" его запрос, он всё равно упадёт по
+ * таймауту.</p>
  */
 public enum BackpressurePolicy {
 
     /**
-     * Caller паркуется до освобождения места (с timeout = ChannelConfig.offerTimeout).
-     * По истечении timeout — RpcException.
-     * <p>
-     * Это самый безопасный default для RPC: мы сохраняем порядок, не теряем
-     * сообщения, и просто замедляемся когда remote не успевает. Ровно то, что
-     * ожидает HTTP-разработчик ("запрос подождёт, пока сервер разгребёт").
+     * Caller паркуется/спинится пока Aeron не примет запрос, либо до
+     * истечения {@code offerTimeout} — тогда {@link
+     * ru.pathcreator.pyc.exceptions.BackpressureException}.
+     *
+     * <p>Default. Безопасно для RPC с I/O-бэкендом: просто "запрос
+     * подождёт", как в HTTP при перегрузке сервера.</p>
      */
     BLOCK,
 
     /**
-     * Caller сразу получает BackpressureException без ожидания.
-     * <p>
-     * Для low-latency систем, где лучше сразу отказать, чем увеличить хвост
-     * latency распределения. Также полезно для circuit-breaker-патернов
-     * поверх RPC: получив BackpressureException клиент решает retry / reroute
-     * / fallback.
+     * Сразу {@link ru.pathcreator.pyc.exceptions.BackpressureException}
+     * если первая же попытка offer/tryClaim вернула BACK_PRESSURED.
+     *
+     * <p>Для сервисов где важнее быстро отказать и дать caller-у
+     * сделать fallback, чем замедлять RPC-путь под нагрузкой.</p>
      */
-    FAIL_FAST,
-
-    /**
-     * Новое сообщение молча отбрасывается, caller видит fail/timeout.
-     * <p>
-     * Для RPC семантики это эквивалентно FAIL_FAST с менее ясной ошибкой,
-     * поэтому НЕ рекомендуется для request/response. Полезно для one-way
-     * телеметрии / метрик, где свежий апдейт может быть не важнее, чем
-     * сохранить работоспособность системы.
-     */
-    DROP_NEW,
-
-    /**
-     * Из очереди удаляется САМЫЙ СТАРЫЙ запрос (его caller получает fail),
-     * новый занимает его место.
-     * <p>
-     * Для RPC это обычно плохой выбор: убиваем запрос, который уже кто-то
-     * ждёт. Оправдано только для "свежесть важнее порядка" кейсов
-     * (live-данные, котировки, телеметрия). Не рекомендуется по умолчанию.
-     */
-    DROP_OLDEST
+    FAIL_FAST
 }

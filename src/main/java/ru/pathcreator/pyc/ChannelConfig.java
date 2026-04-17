@@ -4,95 +4,80 @@ import java.time.Duration;
 import java.util.concurrent.ExecutorService;
 
 /**
- * Настройки одного RPC-канала.
- * <p>
- * Ключевые группы настроек:
- * <p>
- * === Сетевые ===
- * localEndpoint   — UDP, где слушаем.
- * remoteEndpoint  — UDP, куда шлём.
- * streamId        — Aeron stream id. На одном Node может быть несколько
- * каналов с разными streamId.
- * sessionId       — явный Publication sessionId (опц.), 0 = Aeron сам.
- * mtuLength / termLength / socketSndBuf / socketRcvBuf — low-level Aeron.
- * <p>
- * === Timeouts ===
- * defaultTimeout  — default на call() (per-call override доступен).
- * offerTimeout    — сколько sender-тред ждёт на BACK_PRESSURED publication
- * и сколько caller ждёт на full TX queue в режиме BLOCK.
- * <p>
- * === Heartbeat ===
- * heartbeatInterval / heartbeatMissedLimit — детекция DOWN/UP.
- * <p>
- * === Max size и capacity ===
- * maxMessageSize      — HARD limit на один envelope+payload. Default 16 MiB.
- * Больше 16 MiB → PayloadTooLargeException; для них
- * отдельный LargePayloadRpcChannel (TODO).
- * txStagingCapacity   — размер одного TxFrame buffer (должен вмещать
- * envelope+payload для типичного запроса).
- * <p>
- * === TX queue / backpressure ===
- * backpressurePolicy   — что делать когда TX queue заполнена.
- * По умолчанию BLOCK (самое безопасное для RPC).
- * senderQueueCapacity  — ёмкость MPSC-очереди TxFrame'ов между caller-ами
- * и sender-тредом. Должна быть степенью двойки.
- * txFramePoolSize      — число переиспользуемых TxFrame в пуле.
- * Рекомендуется >= senderQueueCapacity.
- * <p>
- * === Pending RPC / pools ===
- * pendingPoolCapacity  — initial размер пула PendingCall.
- * registryInitialCap   — initial capacity HashMap-а pending-calls.
- * <p>
- * === OFFLOAD executor ===
- * offloadExecutor      — куда сабмитить OFFLOAD-handler-ы. Null = default
- * (virtual thread per task executor, создаётся Node-ом
- * и шарится между каналами).
- * offloadTaskPoolSize  — пул OffloadTask-ов (pooled Runnable).
- * offloadCopyPoolSize / offloadCopyBufferSize — пул буферов для копирования
- * payload при OFFLOAD.
+ * Конфигурация одного RPC-канала.
+ *
+ * <h3>Ключевые группы настроек</h3>
+ *
+ * <ul>
+ *   <li><b>Сеть</b>: localEndpoint / remoteEndpoint / streamId.
+ *       sessionId опционален (0 = Aeron выберет).</li>
+ *   <li><b>Таймауты</b>: defaultTimeout (для call), offerTimeout (для
+ *       Publication back-pressure), heartbeat.</li>
+ *   <li><b>Idle стратегия rx-треда</b>: {@link #rxIdleStrategy()}.
+ *       {@code YIELDING} (default) — rx-тред = 100% одного ядра, низкая
+ *       latency. {@code BACKOFF} — ~0% CPU при idle, но штраф на Windows
+ *       до ~1 ms на первое сообщение после idle. {@code BUSY_SPIN} —
+ *       минимум latency, 100% CPU постоянно.</li>
+ *   <li><b>Offload executor</b>: {@link #offloadExecutor()}. Куда
+ *       сабмитить серверные handler-ы. Если null — node-default
+ *       (virtual-thread-per-task). Специальное значение {@link
+ *       #DIRECT_EXECUTOR} = выполнять handler прямо в rx-треде
+ *       (zero-copy, минимальная latency, но блокирует приём на время
+ *       handler-а — использовать ТОЛЬКО для гарантированно быстрых
+ *       handler-ов типа ACK/lookup &lt; 5 µs).</li>
+ *   <li><b>Backpressure</b>: BLOCK или FAIL_FAST.</li>
+ *   <li><b>maxMessageSize</b>: hard cap 16 MiB.</li>
+ * </ul>
  */
 public final class ChannelConfig {
 
     public static final int DEFAULT_MAX_MESSAGE_SIZE = 16 * 1024 * 1024;
 
-    // network
+    /**
+     * Маркерное значение: "выполнять handler прямо в rx-треде".
+     *
+     * <p>Используется так:
+     * <pre>
+     * ChannelConfig.builder()
+     *     .offloadExecutor(ChannelConfig.DIRECT_EXECUTOR)
+     *     ...
+     * </pre>
+     *
+     * <p>Тогда RpcChannel не копирует payload и не сабмитит в executor —
+     * зовёт handler прямо из rx-треда. Минимум latency, но rx-тред
+     * блокируется на время handler-а — годится только для очень быстрых
+     * handler-ов.</p>
+     */
+    public static final ExecutorService DIRECT_EXECUTOR = new DirectExecutorMarker();
+
+    // ---- fields ----
+
+    private final String localEndpoint;
+    private final String remoteEndpoint;
     private final int streamId;
     private final int sessionId;
     private final int mtuLength;
     private final int termLength;
     private final int socketSndBuf;
     private final int socketRcvBuf;
-    private final String localEndpoint;
-    private final String remoteEndpoint;
 
-    // timeouts
-    private final Duration offerTimeout;
     private final Duration defaultTimeout;
-    private final int heartbeatMissedLimit;
+    private final Duration offerTimeout;
     private final Duration heartbeatInterval;
+    private final int heartbeatMissedLimit;
 
-    // size
     private final int maxMessageSize;
-    private final int txStagingCapacity;
 
-    // tx queue
-    private final int txFramePoolSize;
-    private final int senderQueueCapacity;
     private final BackpressurePolicy backpressurePolicy;
+    private final IdleStrategyKind rxIdleStrategy;
 
-    // wire batching (sender-side)
-    private final int maxBatchMessages;
-    private final boolean wireBatchingEnabled;
-
-    // pending
     private final int pendingPoolCapacity;
     private final int registryInitialCapacity;
 
-    // offload
+    private final ExecutorService offloadExecutor;
     private final int offloadTaskPoolSize;
     private final int offloadCopyPoolSize;
     private final int offloadCopyBufferSize;
-    private final ExecutorService offloadExecutor;
 
     private ChannelConfig(final Builder b) {
         this.localEndpoint = b.localEndpoint;
@@ -108,12 +93,8 @@ public final class ChannelConfig {
         this.heartbeatInterval = b.heartbeatInterval;
         this.heartbeatMissedLimit = b.heartbeatMissedLimit;
         this.maxMessageSize = b.maxMessageSize;
-        this.txStagingCapacity = b.txStagingCapacity;
         this.backpressurePolicy = b.backpressurePolicy;
-        this.senderQueueCapacity = b.senderQueueCapacity;
-        this.txFramePoolSize = b.txFramePoolSize;
-        this.wireBatchingEnabled = b.wireBatchingEnabled;
-        this.maxBatchMessages = b.maxBatchMessages;
+        this.rxIdleStrategy = b.rxIdleStrategy;
         this.pendingPoolCapacity = b.pendingPoolCapacity;
         this.registryInitialCapacity = b.registryInitialCapacity;
         this.offloadExecutor = b.offloadExecutor;
@@ -121,6 +102,8 @@ public final class ChannelConfig {
         this.offloadCopyPoolSize = b.offloadCopyPoolSize;
         this.offloadCopyBufferSize = b.offloadCopyBufferSize;
     }
+
+    // ---- getters ----
 
     public String localEndpoint() {
         return localEndpoint;
@@ -174,28 +157,12 @@ public final class ChannelConfig {
         return maxMessageSize;
     }
 
-    public int txStagingCapacity() {
-        return txStagingCapacity;
-    }
-
     public BackpressurePolicy backpressurePolicy() {
         return backpressurePolicy;
     }
 
-    public int senderQueueCapacity() {
-        return senderQueueCapacity;
-    }
-
-    public int txFramePoolSize() {
-        return txFramePoolSize;
-    }
-
-    public boolean wireBatchingEnabled() {
-        return wireBatchingEnabled;
-    }
-
-    public int maxBatchMessages() {
-        return maxBatchMessages;
+    public IdleStrategyKind rxIdleStrategy() {
+        return rxIdleStrategy;
     }
 
     public int pendingPoolCapacity() {
@@ -222,6 +189,10 @@ public final class ChannelConfig {
         return offloadCopyBufferSize;
     }
 
+    public boolean isDirectExecutor() {
+        return offloadExecutor instanceof DirectExecutorMarker;
+    }
+
     public static Builder builder() {
         return new Builder();
     }
@@ -242,22 +213,14 @@ public final class ChannelConfig {
         private int heartbeatMissedLimit = 3;
 
         private int maxMessageSize = DEFAULT_MAX_MESSAGE_SIZE;
-        private int txStagingCapacity = 4096;
 
         private BackpressurePolicy backpressurePolicy = BackpressurePolicy.BLOCK;
-        private int senderQueueCapacity = 4096;
-        private int txFramePoolSize = 4096;
-
-        // Wire-batching: "opportunistic drain" — склеивает уже готовые
-        // сообщения в один tryClaim-слот. Не добавляет задержек (не ждём,
-        // пока соберётся batch), поэтому безопасно включать по умолчанию.
-        private boolean wireBatchingEnabled = true;
-        private int maxBatchMessages = 16;
+        private IdleStrategyKind rxIdleStrategy = IdleStrategyKind.YIELDING;
 
         private int pendingPoolCapacity = 4096;
         private int registryInitialCapacity = 1024;
 
-        private ExecutorService offloadExecutor = null;   // null = node default
+        private ExecutorService offloadExecutor = null;  // null = node default (virtual threads)
         private int offloadTaskPoolSize = 1024;
         private int offloadCopyPoolSize = 256;
         private int offloadCopyBufferSize = 8 * 1024;
@@ -327,33 +290,13 @@ public final class ChannelConfig {
             return this;
         }
 
-        public Builder txStagingCapacity(final int v) {
-            this.txStagingCapacity = v;
-            return this;
-        }
-
         public Builder backpressurePolicy(final BackpressurePolicy v) {
             this.backpressurePolicy = v;
             return this;
         }
 
-        public Builder senderQueueCapacity(final int v) {
-            this.senderQueueCapacity = v;
-            return this;
-        }
-
-        public Builder txFramePoolSize(final int v) {
-            this.txFramePoolSize = v;
-            return this;
-        }
-
-        public Builder wireBatchingEnabled(final boolean v) {
-            this.wireBatchingEnabled = v;
-            return this;
-        }
-
-        public Builder maxBatchMessages(final int v) {
-            this.maxBatchMessages = v;
+        public Builder rxIdleStrategy(final IdleStrategyKind v) {
+            this.rxIdleStrategy = v;
             return this;
         }
 
@@ -394,23 +337,16 @@ public final class ChannelConfig {
                 throw new IllegalArgumentException("remoteEndpoint is required");
             if (Integer.bitCount(termLength) != 1)
                 throw new IllegalArgumentException("termLength must be power of two");
-            if (Integer.bitCount(senderQueueCapacity) != 1)
-                throw new IllegalArgumentException("senderQueueCapacity must be power of two");
-            if (maxMessageSize > DEFAULT_MAX_MESSAGE_SIZE) {
-                throw new IllegalArgumentException("maxMessageSize > 16 MiB not supported by RpcChannel. " + "For larger payloads use LargePayloadRpcChannel (not implemented yet).");
-            }
-            if (maxMessageSize < 128) {
+            if (maxMessageSize > DEFAULT_MAX_MESSAGE_SIZE)
+                throw new IllegalArgumentException("maxMessageSize > 16 MiB not supported by RpcChannel. " + "For larger payloads use LargePayloadRpcChannel.");
+            if (maxMessageSize < 128)
                 throw new IllegalArgumentException("maxMessageSize too small");
-            }
-            if (txStagingCapacity > maxMessageSize) {
-                throw new IllegalArgumentException("txStagingCapacity > maxMessageSize");
-            }
-            if (heartbeatMissedLimit < 1) {
+            if (heartbeatMissedLimit < 1)
                 throw new IllegalArgumentException("heartbeatMissedLimit >= 1");
-            }
-            if (maxBatchMessages < 1) {
-                throw new IllegalArgumentException("maxBatchMessages >= 1");
-            }
+            if (rxIdleStrategy == null)
+                throw new IllegalArgumentException("rxIdleStrategy is required");
+            if (backpressurePolicy == null)
+                throw new IllegalArgumentException("backpressurePolicy is required");
             return new ChannelConfig(this);
         }
     }

@@ -22,8 +22,9 @@ import org.agrona.MutableDirectBuffer;
  * <p>
  * Ответственность пользователя:
  * - не писать в request buffer (он может быть shared rx-buffer-ом);
- * - в режиме INLINE request buffer валиден только пока rawHandle()
- * не вернулся; в OFFLOAD — всё время жизни вызова (копия из пула);
+ * - request buffer валиден только пока handle() не вернулся
+ * (в обычном offload-режиме это копия из пула; в direct-executor-режиме
+ * это rx-буфер Aeron-а);
  * - в responseBuffer писать начиная с responseOffset и не дальше
  * responseOffset + responseCapacity.
  */

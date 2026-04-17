@@ -8,86 +8,80 @@ import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
 import org.agrona.MutableDirectBuffer;
 import org.agrona.collections.Int2ObjectHashMap;
-import org.agrona.concurrent.BackoffIdleStrategy;
-import org.agrona.concurrent.IdleStrategy;
-import org.agrona.concurrent.UnsafeBuffer;
+import org.agrona.concurrent.*;
 import ru.pathcreator.pyc.codec.MessageCodec;
 import ru.pathcreator.pyc.envelope.Envelope;
 import ru.pathcreator.pyc.envelope.EnvelopeCodec;
-import ru.pathcreator.pyc.exceptions.NotConnectedException;
-import ru.pathcreator.pyc.exceptions.PayloadTooLargeException;
-import ru.pathcreator.pyc.exceptions.RpcException;
-import ru.pathcreator.pyc.exceptions.RpcTimeoutException;
+import ru.pathcreator.pyc.exceptions.*;
 import ru.pathcreator.pyc.internal.*;
 
+import java.nio.ByteBuffer;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Один двунаправленный RPC-канал.
- * <p>
- * Архитектура:
- * <p>
- * +-------- caller threads (virtual or platform) --------+
- * |                                                     |
- * call() ------>| acquire TxFrame, encode envelope+payload            |
- * |  submit(frame, policy)                               |
- * |                                                     |
- * +----------------------------------+------------------+
- * v
- * lock-free MPSC (SenderQueue)
- * v
- * +---- single sender thread ----+
- * |  publication.offer() loop    |
- * |  with BackoffIdleStrategy    |
- * +------------------------------+
- * v
- * Aeron UDP
- * v
- * +---- single rx thread --------+
- * |  subscription.poll() loop    |
- * |  dispatch by messageTypeId   |
- * +------------------------------+
- * v
- * response -> PendingCall (unpark caller)
- * request (INLINE) -> handler in rx-thread
- * request (OFFLOAD) -> copy + submit to executor
- * <p>
- * Выделенный sender thread убирает contention: caller-ы только пишут в
- * lock-free очередь, за Publication конкуренция нулевая (single producer).
- * Для размеров &lt;= maxPayloadLength мы используем tryClaim() — zero-copy
- * путь напрямую в log buffer публикации.
+ *
+ * <h3>Архитектура (после оптимизации)</h3>
+ *
+ * <pre>
+ *   caller (virtual or platform thread)
+ *     │
+ *     │ call(req, codec, respCodec)
+ *     ▼
+ *   ┌────────────────────────────────────────────┐
+ *   │ 1. acquire PendingCall from pool           │
+ *   │ 2. register correlationId                  │
+ *   │ 3. ThreadLocal staging buffer              │
+ *   │ 4. encode envelope + payload               │
+ *   │ 5. publication.tryClaim + commit           │
+ *   │    (ConcurrentPublication — concurrent)    │
+ *   │ 6. SyncWaiter.await()                      │
+ *   └────────────────────────────────────────────┘
+ *
+ *                          │ UDP
+ *                          ▼
+ *   single rx thread per channel
+ *   └── subscription.poll() loop with IdleStrategy
+ *       │
+ *       ├── response → pendingRegistry.remove → PendingCall.completeOk → unpark caller
+ *       │
+ *       └── request → OFFLOAD to executor (virtual threads by default)
+ *                   OR direct-execute in rx thread (if DIRECT_EXECUTOR configured)
+ * </pre>
+ *
+ * <h3>Ключевые отличия от предыдущей версии</h3>
+ * <ul>
+ *  <li>Нет sender-треда и MPSC-очереди. Caller пишет прямо в
+ *      {@link ConcurrentPublication#tryClaim}. На один hop меньше.</li>
+ *  <li>Публикация concurrent (не exclusive) — несколько caller-ов могут
+ *      писать одновременно, Aeron справляется через CAS на position.</li>
+ *  <li>Handler-ы всегда OFFLOAD (или DIRECT_EXECUTOR). Нет INLINE.</li>
+ *  <li>Удалён wire-batching (он имел смысл только с sender-тредом).</li>
+ * </ul>
  */
 public final class RpcChannel implements AutoCloseable {
 
     private static final int MIN_USER_MESSAGE_TYPE_ID = 1;
 
     // ---- handler entry types ----
-    private static abstract class HandlerEntry {
-        final HandlerMode mode;
 
-        HandlerEntry(final HandlerMode mode) {
-            this.mode = mode;
-        }
+    private static abstract class HandlerEntry {
     }
 
     private static final class HighLevelEntry extends HandlerEntry {
-
-        final int responseMessageTypeId;
         final MessageCodec<Object> reqCodec;
         final MessageCodec<Object> respCodec;
+        final int responseMessageTypeId;
         final RequestHandler<Object, Object> handler;
 
         @SuppressWarnings("unchecked")
-        HighLevelEntry(
-                final HandlerMode mode,
-                final MessageCodec<?> reqCodec,
-                final MessageCodec<?> respCodec,
-                final int responseMessageTypeId,
-                final RequestHandler<?, ?> handler
-        ) {
-            super(mode);
+        HighLevelEntry(final MessageCodec<?> reqCodec,
+                       final MessageCodec<?> respCodec,
+                       final int responseMessageTypeId,
+                       final RequestHandler<?, ?> handler) {
             this.reqCodec = (MessageCodec<Object>) reqCodec;
             this.respCodec = (MessageCodec<Object>) respCodec;
             this.responseMessageTypeId = responseMessageTypeId;
@@ -96,55 +90,63 @@ public final class RpcChannel implements AutoCloseable {
     }
 
     private static final class RawEntry extends HandlerEntry {
-
         final int responseMessageTypeId;
         final RawRequestHandler handler;
 
-        RawEntry(final HandlerMode mode, final int responseMessageTypeId, final RawRequestHandler handler) {
-            super(mode);
+        RawEntry(final int responseMessageTypeId, final RawRequestHandler handler) {
             this.responseMessageTypeId = responseMessageTypeId;
             this.handler = handler;
         }
     }
 
     // ---- fields ----
+
     private final ChannelConfig config;
     private final ExecutorService offloadExecutor;
+    private final boolean directExecutor;
 
+    private final ConcurrentPublication publication;
     private final Subscription subscription;
-    private final ExclusivePublication publication;
 
-    // Read-only after start()
+    /**
+     * Read-only after start().
+     */
     private final Int2ObjectHashMap<HandlerEntry> handlers = new Int2ObjectHashMap<>();
 
-    // pools / registries
-    private final TxFrame.Pool txFramePool;
+    // Pending RPC
     private final PendingCallPool pendingPool;
-    private final OffloadTask.Pool offloadTaskPool;
     private final PendingCallRegistry pendingRegistry;
-    private final SyncWaiter waiter = new SyncWaiter();
     private final CorrelationIdGenerator correlations = new CorrelationIdGenerator();
+    private final SyncWaiter waiter = new SyncWaiter();
 
+    // TX: per-thread staging buffer. ExclusivePublication нам не нужен, но
+    // каждому потоку нужен свой staging buffer для encode → put → tryClaim.
+    // Используем ThreadLocal direct-буферы.
+    private final ThreadLocal<UnsafeBuffer> txStaging;
+
+    // Offload infra
+    private final OffloadTask.Pool offloadTaskPool;
+    private final ConcurrentLinkedQueue<UnsafeBuffer> offloadCopyPool;
     private final int offloadCopyBufferSize;
-    // Offload copy: пул буферов для копирования payload при OFFLOAD.
-    // Индекс свободных буферов через MPMC очередь (Agrona).
-    private final org.agrona.concurrent.ManyToManyConcurrentArrayQueue<UnsafeBuffer> offloadCopyPool;
 
-    // tx path
-    private final SenderQueue sender;
+    // Reusable BufferClaim для tryClaim. Разные caller-ы не могут шарить
+    // один BufferClaim — каждому нужен свой. Используем ThreadLocal.
+    private final ThreadLocal<BufferClaim> bufferClaimTl = ThreadLocal.withInitial(BufferClaim::new);
 
-    // rx path
+    // Reusable idle strategy для tryClaim back-pressure waits. Thread-local
+    // потому что несколько caller-ов могут тут крутиться одновременно.
+    private final ThreadLocal<IdleStrategy> txIdleTl =
+            ThreadLocal.withInitial(YieldingIdleStrategy::new);
+
+    // RX
     private final Thread rxThread;
     private final AtomicBoolean running = new AtomicBoolean(false);
 
-    // heartbeat
+    // Heartbeat
     private final HeartbeatManager heartbeat;
 
-    // Stable reference to the offload body — создаётся один раз.
+    // Stable body for offload tasks — one allocation, reused for all requests.
     private final OffloadTask.Body offloadBody = this::runOffload;
-
-    // Per-response BufferClaim for tryClaim fast-path (single-threaded sender).
-    private final BufferClaim bufferClaim = new BufferClaim();
 
     public RpcChannel(
             final ChannelConfig config,
@@ -152,11 +154,18 @@ public final class RpcChannel implements AutoCloseable {
             final ExecutorService nodeDefaultExecutor
     ) {
         this.config = config;
-        this.offloadExecutor = config.offloadExecutor() != null
-                ? config.offloadExecutor()
-                : nodeDefaultExecutor;
 
-        // Build Aeron channels
+        final boolean direct = config.isDirectExecutor();
+        this.directExecutor = direct;
+        if (direct) {
+            this.offloadExecutor = null;  // unused
+        } else {
+            this.offloadExecutor = config.offloadExecutor() != null
+                    ? config.offloadExecutor()
+                    : nodeDefaultExecutor;
+        }
+
+        // Aeron channels
         final ChannelUriStringBuilder outbound = new ChannelUriStringBuilder()
                 .media("udp")
                 .endpoint(config.remoteEndpoint())
@@ -166,7 +175,9 @@ public final class RpcChannel implements AutoCloseable {
                 .socketRcvbufLength(config.socketRcvBuf())
                 .reliable(true);
         if (config.sessionId() != 0) outbound.sessionId(config.sessionId());
-        this.publication = aeron.addExclusivePublication(outbound.build(), config.streamId());
+        // ConcurrentPublication: несколько caller-ов могут tryClaim/offer
+        // одновременно без нашего локинга.
+        this.publication = aeron.addPublication(outbound.build(), config.streamId());
 
         final String inbound = new ChannelUriStringBuilder()
                 .media("udp")
@@ -178,28 +189,21 @@ public final class RpcChannel implements AutoCloseable {
         // Pools
         this.pendingPool = new PendingCallPool(config.pendingPoolCapacity());
         this.pendingRegistry = new PendingCallRegistry(config.registryInitialCapacity());
-        this.txFramePool = new TxFrame.Pool(config.txFramePoolSize(), config.txStagingCapacity());
+
+        final int staging = Math.min(config.maxMessageSize(), 4096);
+        this.txStaging = ThreadLocal.withInitial(
+                () -> new UnsafeBuffer(ByteBuffer.allocateDirect(staging)));
+
         this.offloadTaskPool = new OffloadTask.Pool(config.offloadTaskPoolSize());
         this.offloadCopyBufferSize = config.offloadCopyBufferSize();
-        this.offloadCopyPool = new org.agrona.concurrent.ManyToManyConcurrentArrayQueue<>(config.offloadCopyPoolSize());
+        this.offloadCopyPool = new ConcurrentLinkedQueue<>();
         for (int i = 0; i < config.offloadCopyPoolSize(); i++) {
-            offloadCopyPool.offer(new UnsafeBuffer(
-                    java.nio.ByteBuffer.allocateDirect(offloadCopyBufferSize)));
+            offloadCopyPool.offer(new UnsafeBuffer(ByteBuffer.allocateDirect(offloadCopyBufferSize)));
         }
 
-        // Sender
-        this.sender = new SenderQueue(
-                config.localEndpoint() + "-s" + config.streamId(),
-                publication,
-                txFramePool,
-                pendingRegistry,
-                config.senderQueueCapacity(),
-                config.offerTimeout().toNanos(),
-                config.wireBatchingEnabled(),
-                config.maxBatchMessages());
-
-        // Rx
-        this.rxThread = new Thread(this::rxLoop, "rpc-rx-" + config.localEndpoint() + "-s" + config.streamId());
+        // Rx thread
+        this.rxThread = new Thread(this::rxLoop,
+                "rpc-rx-" + config.localEndpoint() + "-s" + config.streamId());
         this.rxThread.setDaemon(false);
 
         // Heartbeat
@@ -213,46 +217,41 @@ public final class RpcChannel implements AutoCloseable {
     }
 
     // ================================================================
-    //                          handler registration
+    //                       handler registration
     // ================================================================
-    public void onRaw(
-            final int requestMessageTypeId,
-            final int responseMessageTypeId,
-            final HandlerMode mode,
-            final RawRequestHandler handler
-    ) {
+
+    public void onRaw(final int requestMessageTypeId,
+                      final int responseMessageTypeId,
+                      final RawRequestHandler handler) {
         validateUserMessageTypeId(requestMessageTypeId);
         validateUserMessageTypeId(responseMessageTypeId);
         ensureNotStarted();
-        if (handlers.put(requestMessageTypeId, new RawEntry(mode, responseMessageTypeId, handler)) != null) {
-            throw new IllegalStateException("handler already registered for messageTypeId=" + requestMessageTypeId);
-        }
+        if (handlers.put(requestMessageTypeId, new RawEntry(responseMessageTypeId, handler)) != null)
+            throw new IllegalStateException(
+                    "handler already registered for messageTypeId=" + requestMessageTypeId);
     }
 
-    public <Req, Resp> void onRequest(
-            final int requestMessageTypeId,
-            final int responseMessageTypeId,
-            final MessageCodec<Req> reqCodec,
-            final MessageCodec<Resp> respCodec,
-            final HandlerMode mode,
-            final RequestHandler<Req, Resp> handler
-    ) {
+    public <Req, Resp> void onRequest(final int requestMessageTypeId,
+                                      final int responseMessageTypeId,
+                                      final MessageCodec<Req> reqCodec,
+                                      final MessageCodec<Resp> respCodec,
+                                      final RequestHandler<Req, Resp> handler) {
         validateUserMessageTypeId(requestMessageTypeId);
         validateUserMessageTypeId(responseMessageTypeId);
         ensureNotStarted();
-        if (handlers.put(requestMessageTypeId, new HighLevelEntry(mode, reqCodec, respCodec, responseMessageTypeId, handler)) != null) {
-            throw new IllegalStateException("handler already registered for messageTypeId=" + requestMessageTypeId);
-        }
+        if (handlers.put(requestMessageTypeId,
+                new HighLevelEntry(reqCodec, respCodec, responseMessageTypeId, handler)) != null)
+            throw new IllegalStateException(
+                    "handler already registered for messageTypeId=" + requestMessageTypeId);
     }
 
     // ================================================================
-    //                               lifecycle
+    //                             lifecycle
     // ================================================================
+
     public void start() {
-        if (!running.compareAndSet(false, true)) {
+        if (!running.compareAndSet(false, true))
             throw new IllegalStateException("already started");
-        }
-        sender.start();
         rxThread.start();
         heartbeat.start();
     }
@@ -261,18 +260,17 @@ public final class RpcChannel implements AutoCloseable {
     public void close() {
         running.set(false);
         heartbeat.close();
-        sender.close();
         try {
             rxThread.join(2000);
         } catch (final InterruptedException ie) {
             Thread.currentThread().interrupt();
         }
 
-        // Failfast висящие calls.
         pendingRegistry.forEachAndClear(pc -> {
             pc.completeFail("channel closed");
             pendingPool.release(pc);
         });
+
         CloseHelper.closeAll(subscription, publication);
     }
 
@@ -281,97 +279,70 @@ public final class RpcChannel implements AutoCloseable {
     }
 
     // ================================================================
-    //                           client API: call()
+    //                          client API: call()
     // ================================================================
-    public <Req, Resp> Resp call(
-            final int requestMessageTypeId,
-            final int expectedResponseTypeId,
-            final Req request,
-            final MessageCodec<Req> reqCodec,
-            final MessageCodec<Resp> respCodec
-    ) {
+
+    public <Req, Resp> Resp call(final int requestMessageTypeId,
+                                 final int expectedResponseTypeId,
+                                 final Req request,
+                                 final MessageCodec<Req> reqCodec,
+                                 final MessageCodec<Resp> respCodec) {
         return call(requestMessageTypeId, expectedResponseTypeId, request, reqCodec, respCodec,
-                config.defaultTimeout().toNanos(),
-                config.backpressurePolicy());
+                config.defaultTimeout().toNanos(), config.backpressurePolicy());
     }
 
-    public <Req, Resp> Resp call(
-            final int requestMessageTypeId,
-            final int expectedResponseTypeId,
-            final Req request,
-            final MessageCodec<Req> reqCodec,
-            final MessageCodec<Resp> respCodec,
-            final long timeout,
-            final TimeUnit unit
-    ) {
+    public <Req, Resp> Resp call(final int requestMessageTypeId,
+                                 final int expectedResponseTypeId,
+                                 final Req request,
+                                 final MessageCodec<Req> reqCodec,
+                                 final MessageCodec<Resp> respCodec,
+                                 final long timeout,
+                                 final TimeUnit unit) {
         return call(requestMessageTypeId, expectedResponseTypeId, request, reqCodec, respCodec,
                 unit.toNanos(timeout), config.backpressurePolicy());
     }
 
-    public <Req, Resp> Resp call(
-            final int requestMessageTypeId,
-            final int expectedResponseTypeId,
-            final Req request,
-            final MessageCodec<Req> reqCodec,
-            final MessageCodec<Resp> respCodec,
-            final long timeoutNs,
-            final BackpressurePolicy policy
-    ) {
+    public <Req, Resp> Resp call(final int requestMessageTypeId,
+                                 final int expectedResponseTypeId,
+                                 final Req request,
+                                 final MessageCodec<Req> reqCodec,
+                                 final MessageCodec<Resp> respCodec,
+                                 final long timeoutNs,
+                                 final BackpressurePolicy policy) {
         validateUserMessageTypeId(requestMessageTypeId);
         validateUserMessageTypeId(expectedResponseTypeId);
-        if (!isConnected()) {
+        if (!isConnected())
             throw new NotConnectedException("channel not connected: " + config.remoteEndpoint());
-        }
 
         final PendingCall call = pendingPool.acquire();
         final long correlationId = correlations.next();
         call.prepare(Thread.currentThread(), correlationId);
         pendingRegistry.register(correlationId, call);
 
-        boolean submitted = false;
         try {
-            // Acquire frame (из пула; аллокация только если пул исчерпан).
-            final TxFrame frame = txFramePool.acquire();
-            final MutableDirectBuffer buf = frame.buffer();
-
-            // Encode payload сразу за envelope'ом.
-            final int payloadLen = reqCodec.encode(request, buf, Envelope.LENGTH);
+            // 1. Encode в staging.
+            final UnsafeBuffer staging = txStaging.get();
+            final int payloadLen = reqCodec.encode(request, staging, Envelope.LENGTH);
             final int totalLen = Envelope.LENGTH + payloadLen;
 
-            if (totalLen > config.maxMessageSize()) {
-                txFramePool.release(frame);
+            if (totalLen > config.maxMessageSize())
                 throw new PayloadTooLargeException(totalLen, config.maxMessageSize());
-            }
-            if (totalLen > buf.capacity()) {
-                txFramePool.release(frame);
+            if (totalLen > staging.capacity())
                 throw new RpcException(
-                        "Encoded request does not fit TxFrame buffer; increase txStagingCapacity; " +
-                        "totalLen=" + totalLen + ", capacity=" + buf.capacity());
-            }
+                        "Encoded request does not fit staging buffer (totalLen=" + totalLen +
+                        ", capacity=" + staging.capacity() + "). Enlarge via maxMessageSize or use smaller payload.");
 
-            EnvelopeCodec.encode(buf, 0,
+            EnvelopeCodec.encode(staging, 0,
                     requestMessageTypeId, correlationId,
                     Envelope.FLAG_IS_REQUEST, payloadLen);
 
-            frame.set(totalLen, correlationId, call);
+            // 2. Send direct. tryClaim fast-path + offer fallback.
+            publishBytes(staging, 0, totalLen, policy);
 
-            // Submit в sender queue. Может бросить BackpressureException.
-            submitted = sender.submit(frame, policy);
-
-            if (!submitted) {
-                // DROP_NEW: запрос молча отброшен — caller получает fail.
-                throw new ru.pathcreator.pyc.exceptions.BackpressureException(
-                        "request dropped by policy DROP_NEW");
-            }
-
-            // Ждём ответ.
+            // 3. Await reply.
             final boolean ok = waiter.await(call, timeoutNs);
-            if (!ok) {
-                throw new RpcTimeoutException(correlationId, timeoutNs);
-            }
-            if (call.isFailed()) {
-                throw new RpcException("RPC failed: " + call.failureReason());
-            }
+            if (!ok) throw new RpcTimeoutException(correlationId, timeoutNs);
+            if (call.isFailed()) throw new RpcException("RPC failed: " + call.failureReason());
 
             return respCodec.decode(call.responseBuffer(), 0, call.responseLength());
 
@@ -381,6 +352,74 @@ public final class RpcChannel implements AutoCloseable {
         }
     }
 
+    /**
+     * Публикация байт в publication.
+     *
+     * <p>Fast-path: {@link ConcurrentPublication#tryClaim} для размера
+     * &le; maxPayloadLength — один wire-фрагмент, zero-copy в log buffer.</p>
+     *
+     * <p>Fallback: {@link ConcurrentPublication#offer} для больших
+     * сообщений (Aeron сам фрагментирует).</p>
+     *
+     * <p>Для BACK_PRESSURED применяется backpressurePolicy.</p>
+     */
+    private void publishBytes(final DirectBuffer src, final int offset, final int length,
+                              final BackpressurePolicy policy) {
+        final long deadline = System.nanoTime() + config.offerTimeout().toNanos();
+        final IdleStrategy idle = txIdleTl.get();
+        idle.reset();
+
+        final int maxPayload = publication.maxPayloadLength();
+        if (length <= maxPayload) {
+            // tryClaim fast-path
+            final BufferClaim claim = bufferClaimTl.get();
+            while (true) {
+                final long r = publication.tryClaim(length, claim);
+                if (r > 0) {
+                    final MutableDirectBuffer buf = claim.buffer();
+                    buf.putBytes(claim.offset(), src, offset, length);
+                    claim.commit();
+                    return;
+                }
+                handlePublishError(r, policy, deadline, idle);
+            }
+        } else {
+            // offer fallback для больших сообщений
+            while (true) {
+                final long r = publication.offer(src, offset, length);
+                if (r > 0) return;
+                handlePublishError(r, policy, deadline, idle);
+            }
+        }
+    }
+
+    /**
+     * Centralized error handling для tryClaim/offer.
+     * Либо бросает типизированное exception, либо idle (и продолжаем retry).
+     */
+    private void handlePublishError(final long result, final BackpressurePolicy policy,
+                                    final long deadline, final IdleStrategy idle) {
+        if (result == Publication.NOT_CONNECTED)
+            throw new NotConnectedException("publication not connected");
+        if (result == Publication.CLOSED)
+            throw new RpcException("publication is closed");
+        if (result == Publication.MAX_POSITION_EXCEEDED)
+            throw new RpcException("publication max position exceeded");
+        if (result == Publication.ADMIN_ACTION || result == Publication.BACK_PRESSURED) {
+            if (policy == BackpressurePolicy.FAIL_FAST)
+                throw new BackpressureException("publication back-pressured (FAIL_FAST)");
+            if (System.nanoTime() >= deadline)
+                throw new BackpressureException(
+                        "publication back-pressured beyond offerTimeout (result=" + result + ")");
+            idle.idle();
+            return;
+        }
+        // unknown — retry with idle
+        if (System.nanoTime() >= deadline)
+            throw new RpcException("publication returned unexpected code=" + result);
+        idle.idle();
+    }
+
     // ================================================================
     //                               RX
     // ================================================================
@@ -388,11 +427,7 @@ public final class RpcChannel implements AutoCloseable {
     private void rxLoop() {
         final FragmentHandler dispatcher = this::dispatch;
         final FragmentAssembler assembler = new FragmentAssembler(dispatcher);
-
-        final IdleStrategy idle = new BackoffIdleStrategy(
-                100, 10,
-                TimeUnit.NANOSECONDS.toNanos(1),
-                TimeUnit.MICROSECONDS.toNanos(100));
+        final IdleStrategy idle = createIdleStrategy(config.rxIdleStrategy());
 
         while (running.get()) {
             final int fragments = subscription.poll(assembler, 16);
@@ -400,79 +435,74 @@ public final class RpcChannel implements AutoCloseable {
         }
     }
 
-    /**
-     * Парсит содержимое одного фрагмента Aeron-а. Фрагмент может содержать
-     * 1..N envelope-ов подряд (wire-batching на отправителе), поэтому идём
-     * циклом пока не кончится length.
-     * <p>
-     * Хорошая новость для receiver-а: ЭТО ТОТ ЖЕ КОД что для одиночного
-     * envelope-а, просто обёрнутый в цикл. Совместим и со старыми отправителями
-     * (которые шлют по одному envelope-у) без изменений.
-     */
-    private void dispatch(
-            final DirectBuffer buffer,
-            final int offset,
-            final int length,
-            final Header header
-    ) {
+    private static IdleStrategy createIdleStrategy(final IdleStrategyKind kind) {
+        switch (kind) {
+            case BUSY_SPIN:
+                return new BusySpinIdleStrategy();
+            case BACKOFF:
+                return new BackoffIdleStrategy(
+                        100, 10,
+                        TimeUnit.NANOSECONDS.toNanos(1),
+                        TimeUnit.MILLISECONDS.toNanos(1));
+            case YIELDING:
+            default:
+                return new YieldingIdleStrategy();
+        }
+    }
+
+    private void dispatch(final DirectBuffer buffer, final int offset, final int length,
+                          final Header header) {
+        // Одиночный envelope (wire-batching удалён). Но формально парсим
+        // циклом — вдруг когда-нибудь вернём batching.
         int cursor = 0;
         while (cursor < length) {
-            // Нужно минимум ENVELOPE, иначе это не наше сообщение / мусор.
             if (length - cursor < Envelope.LENGTH) return;
+            final int abs = offset + cursor;
 
-            final int absOffset = offset + cursor;
+            if (EnvelopeCodec.magic(buffer, abs) != Envelope.MAGIC) return;
+            if (EnvelopeCodec.version(buffer, abs) != Envelope.VERSION) return;
 
-            final short magic = EnvelopeCodec.magic(buffer, absOffset);
-            if (magic != Envelope.MAGIC) return;
-            if (EnvelopeCodec.version(buffer, absOffset) != Envelope.VERSION) return;
-
-            final int msgTypeId = EnvelopeCodec.messageTypeId(buffer, absOffset);
-            final long correlationId = EnvelopeCodec.correlationId(buffer, absOffset);
-            final int flags = EnvelopeCodec.flags(buffer, absOffset);
-            final int payloadLen = EnvelopeCodec.payloadLength(buffer, absOffset);
-
+            final int msgTypeId = EnvelopeCodec.messageTypeId(buffer, abs);
+            final long correlationId = EnvelopeCodec.correlationId(buffer, abs);
+            final int flags = EnvelopeCodec.flags(buffer, abs);
+            final int payloadLen = EnvelopeCodec.payloadLength(buffer, abs);
             final int totalLen = Envelope.LENGTH + payloadLen;
-            // Защита от corrupt payloadLength (не даём уйти за пределы фрагмента).
             if (totalLen < Envelope.LENGTH || cursor + totalLen > length) return;
 
             if (EnvelopeCodec.isHeartbeat(flags) || msgTypeId == Envelope.RESERVED_HEARTBEAT) {
                 heartbeat.onHeartbeatReceived();
             } else {
-                final int payloadOffset = absOffset + Envelope.LENGTH;
+                final int payloadOffset = abs + Envelope.LENGTH;
                 if (EnvelopeCodec.isRequest(flags)) {
                     handleRequest(msgTypeId, correlationId, buffer, payloadOffset, payloadLen);
                 } else {
                     handleResponse(correlationId, buffer, payloadOffset, payloadLen);
                 }
             }
-
             cursor += totalLen;
         }
     }
 
-    private void handleRequest(
-            final int messageTypeId,
-            final long correlationId,
-            final DirectBuffer buffer,
-            final int payloadOffset,
-            final int payloadLen
-    ) {
+    private void handleRequest(final int messageTypeId, final long correlationId,
+                               final DirectBuffer buffer, final int payloadOffset, final int payloadLen) {
         final HandlerEntry entry = handlers.get(messageTypeId);
         if (entry == null) return;
-        if (entry.mode == HandlerMode.INLINE) {
+
+        if (directExecutor) {
+            // Exec в rx-треде, без копирования и offload. Минимум latency.
             invokeHandler(entry, messageTypeId, correlationId, buffer, payloadOffset, payloadLen);
             return;
         }
 
-        // OFFLOAD: копируем payload в буфер из пула + сабмитим pooled task.
+        // OFFLOAD: копируем payload (чтобы rx-буфер не пропал) и сабмитим.
         if (payloadLen > offloadCopyBufferSize) {
-            // Fallback в INLINE, чтобы не ронять; или можно дропать — зависит от политики.
-            // По умолчанию предпочитаем обработать inline с логом.
+            // Защита: payload не влезает в offload-буфер. Exec inline
+            // (потеряем latency rx но не сломаемся). В проде это worth warning.
             invokeHandler(entry, messageTypeId, correlationId, buffer, payloadOffset, payloadLen);
             return;
         }
 
-        final UnsafeBuffer copy = acquireOffloadCopy();
+        final UnsafeBuffer copy = acquireCopy();
         copy.putBytes(0, buffer, payloadOffset, payloadLen);
 
         final OffloadTask task = offloadTaskPool.acquire();
@@ -481,129 +511,87 @@ public final class RpcChannel implements AutoCloseable {
     }
 
     /**
-     * Body для OffloadTask. Вызывается из executor-а после копирования.
+     * Body для OffloadTask (выполняется в executor-е).
      */
-    private void runOffload(
-            final int messageTypeId,
-            final long correlationId,
-            final UnsafeBuffer payloadCopy,
-            final int payloadLength,
-            final Object handlerEntryObj
-    ) {
+    private void runOffload(final int messageTypeId, final long correlationId,
+                            final UnsafeBuffer copy, final int length, final Object entryObj) {
         try {
-            invokeHandler((HandlerEntry) handlerEntryObj, messageTypeId, correlationId, payloadCopy, 0, payloadLength);
+            invokeHandler((HandlerEntry) entryObj, messageTypeId, correlationId, copy, 0, length);
         } finally {
-            releaseOffloadCopy(payloadCopy);
+            releaseCopy(copy);
         }
     }
 
-    private void invokeHandler(
-            final HandlerEntry entry,
-            final int requestMessageTypeId,
-            final long correlationId,
-            final DirectBuffer buffer,
-            final int payloadOffset,
-            final int payloadLen
-    ) {
+    private void invokeHandler(final HandlerEntry entry, final int requestMessageTypeId,
+                               final long correlationId, final DirectBuffer buffer,
+                               final int payloadOffset, final int payloadLen) {
         try {
-            if (entry instanceof RawEntry raw) {
-                invokeRawHandler(raw, correlationId, buffer, payloadOffset, payloadLen);
-            } else {
-                final HighLevelEntry hl = (HighLevelEntry) entry;
-                invokeHighLevelHandler(hl, correlationId, buffer, payloadOffset, payloadLen);
-            }
+            if (entry instanceof RawEntry raw) invokeRaw(raw, correlationId, buffer, payloadOffset, payloadLen);
+            else invokeHighLevel((HighLevelEntry) entry, correlationId, buffer, payloadOffset, payloadLen);
         } catch (final Throwable t) {
-            // Никогда не даём упасть handler-у раз-handler-у:
-            // лог + пропуск ответа. Caller упадёт по таймауту.
             t.printStackTrace(System.err);
         }
     }
 
-    private void invokeRawHandler(
-            final RawEntry entry,
-            final long correlationId,
-            final DirectBuffer buffer,
-            final int payloadOffset,
-            final int payloadLen
-    ) {
-        // Берём TxFrame под ответ, даём handler-у его buffer с местом начиная с envelope offset.
-        final TxFrame frame = txFramePool.acquire();
-        final MutableDirectBuffer outBuf = frame.buffer();
+    private void invokeRaw(final RawEntry entry, final long correlationId,
+                           final DirectBuffer buffer, final int payloadOffset, final int payloadLen) {
+        // Serverside TX: staging из ThreadLocal (для handler-а который в
+        // rx-треде или в offload-треде — всё равно каждому свой).
+        final UnsafeBuffer staging = txStaging.get();
         final int responseOffset = Envelope.LENGTH;
-        final int responseCapacity = outBuf.capacity() - responseOffset;
-        final int written = entry.handler.handle(buffer, payloadOffset, payloadLen, outBuf, responseOffset, responseCapacity);
-        if (written <= 0) {
-            // One-way / handler не хочет отвечать.
-            txFramePool.release(frame);
-            return;
-        }
-        if (written > responseCapacity) {
-            txFramePool.release(frame);
+        final int responseCapacity = staging.capacity() - responseOffset;
+
+        final int written = entry.handler.handle(
+                buffer, payloadOffset, payloadLen,
+                staging, responseOffset, responseCapacity);
+
+        if (written <= 0) return;
+        if (written > responseCapacity)
             throw new PayloadTooLargeException(Envelope.LENGTH + written, config.maxMessageSize());
-        }
 
-        EnvelopeCodec.encode(outBuf, 0, entry.responseMessageTypeId, correlationId, 0, written);
-        frame.set(Envelope.LENGTH + written, correlationId, null);
-        // Для ответов политика — BLOCK (нельзя потерять ответ, caller ждёт).
-        sender.submit(frame, BackpressurePolicy.BLOCK);
+        EnvelopeCodec.encode(staging, 0, entry.responseMessageTypeId, correlationId, 0, written);
+        publishBytes(staging, 0, Envelope.LENGTH + written, BackpressurePolicy.BLOCK);
     }
 
-    private void invokeHighLevelHandler(
-            final HighLevelEntry entry,
-            final long correlationId,
-            final DirectBuffer buffer,
-            final int payloadOffset,
-            final int payloadLen
-    ) {
-        final Object reqObj = entry.reqCodec.decode(buffer, payloadOffset, payloadLen);
-        final Object respObj = entry.handler.handle(reqObj);
-        if (respObj == null) return;  // handler решил не отвечать.
-        final TxFrame frame = txFramePool.acquire();
-        final MutableDirectBuffer outBuf = frame.buffer();
-        final int respLen = entry.respCodec.encode(respObj, outBuf, Envelope.LENGTH);
+    private void invokeHighLevel(final HighLevelEntry entry, final long correlationId,
+                                 final DirectBuffer buffer, final int payloadOffset, final int payloadLen) {
+        final Object req = entry.reqCodec.decode(buffer, payloadOffset, payloadLen);
+        final Object resp = entry.handler.handle(req);
+        if (resp == null) return;
+
+        final UnsafeBuffer staging = txStaging.get();
+        final int respLen = entry.respCodec.encode(resp, staging, Envelope.LENGTH);
         final int totalLen = Envelope.LENGTH + respLen;
-        if (totalLen > config.maxMessageSize()) {
-            txFramePool.release(frame);
+        if (totalLen > config.maxMessageSize())
             throw new PayloadTooLargeException(totalLen, config.maxMessageSize());
-        }
-        EnvelopeCodec.encode(outBuf, 0, entry.responseMessageTypeId, correlationId, 0, respLen);
-        frame.set(totalLen, correlationId, null);
-        sender.submit(frame, BackpressurePolicy.BLOCK);
+
+        EnvelopeCodec.encode(staging, 0, entry.responseMessageTypeId, correlationId, 0, respLen);
+        publishBytes(staging, 0, totalLen, BackpressurePolicy.BLOCK);
     }
 
-    private void handleResponse(
-            final long correlationId,
-            final DirectBuffer buffer,
-            final int payloadOffset,
-            final int payloadLen
-    ) {
+    private void handleResponse(final long correlationId, final DirectBuffer buffer,
+                                final int payloadOffset, final int payloadLen) {
         final PendingCall call = pendingRegistry.remove(correlationId);
-        if (call == null) return;  // поздний / после таймаута
+        if (call == null) return;
         call.completeOk(buffer, payloadOffset, payloadLen);
     }
 
     // ================================================================
-    //                             heartbeat TX
+    //                          heartbeat + copy pool
     // ================================================================
     private void emitHeartbeat(final long nowNanos) {
-        // Heartbeat всегда идёт мимо sender queue напрямую — он маленький
-        // (24 байта), не должен блокировать другие сообщения.
-        // Делаем это через ту же single-sender-thread модель: кладём в очередь.
-        // Если полна — пропускаем (следующий тик перекроет).
-        final TxFrame frame = txFramePool.acquire();
-        final MutableDirectBuffer buf = frame.buffer();
-        EnvelopeCodec.encode(buf, 0, Envelope.RESERVED_HEARTBEAT, 0L, Envelope.FLAG_IS_HEARTBEAT, 0);
-        frame.set(Envelope.LENGTH, 0L, null);
-        // DROP_NEW: пропустим этот тик если очередь забита.
+        final UnsafeBuffer staging = txStaging.get();
+        EnvelopeCodec.encode(staging, 0, Envelope.RESERVED_HEARTBEAT, 0L, Envelope.FLAG_IS_HEARTBEAT, 0);
+        // FAIL_FAST: пропустим тик если publication под нагрузкой.
         try {
-            sender.submit(frame, BackpressurePolicy.DROP_NEW);
+            publishBytes(staging, 0, Envelope.LENGTH, BackpressurePolicy.FAIL_FAST);
         } catch (final Throwable t) {
-            // не даём упасть heartbeat-треду
+            // ignore — следующий тик перекроет
         }
     }
 
     private void onChannelDown() {
-        System.err.println("RPC: channel DOWN -> failfast " + pendingRegistry.size() + " pending calls");
+        System.err.println("RPC: channel DOWN -> failfast " + pendingRegistry.size() + " pending");
         pendingRegistry.forEachAndClear(pc -> {
             pc.completeFail("channel DOWN (heartbeat missed)");
             pendingPool.release(pc);
@@ -614,30 +602,21 @@ public final class RpcChannel implements AutoCloseable {
         System.err.println("RPC: channel UP");
     }
 
-    // ================================================================
-    //                           offload copy pool
-    // ================================================================
-    private UnsafeBuffer acquireOffloadCopy() {
+    private UnsafeBuffer acquireCopy() {
         final UnsafeBuffer b = offloadCopyPool.poll();
-        return b != null ? b : new UnsafeBuffer(java.nio.ByteBuffer.allocateDirect(offloadCopyBufferSize));
+        return b != null ? b : new UnsafeBuffer(ByteBuffer.allocateDirect(offloadCopyBufferSize));
     }
 
-    private void releaseOffloadCopy(final UnsafeBuffer buffer) {
-        offloadCopyPool.offer(buffer);
+    private void releaseCopy(final UnsafeBuffer b) {
+        offloadCopyPool.offer(b);
     }
 
-    // ================================================================
-    //                              validation
-    // ================================================================
     private void validateUserMessageTypeId(final int id) {
-        if (id < MIN_USER_MESSAGE_TYPE_ID) {
-            throw new IllegalArgumentException("messageTypeId must be >= " + MIN_USER_MESSAGE_TYPE_ID + " (zero and negative reserved). Got: " + id);
-        }
+        if (id < MIN_USER_MESSAGE_TYPE_ID)
+            throw new IllegalArgumentException("messageTypeId must be >= " + MIN_USER_MESSAGE_TYPE_ID + " (got " + id + ")");
     }
 
     private void ensureNotStarted() {
-        if (running.get()) {
-            throw new IllegalStateException("handlers must be registered before start()");
-        }
+        if (running.get()) throw new IllegalStateException("register handlers before start()");
     }
 }
