@@ -455,7 +455,9 @@ public final class RpcChannel implements AutoCloseable {
             if (call.isFailed()) throw new RpcException("RPC failed: " + call.failureReason());
             return respCodec.decode(call.responseBuffer(), 0, call.responseLength());
         } finally {
-            pendingRegistry.remove(correlationId);
+            if (!call.isCompleted()) {
+                pendingRegistry.remove(correlationId);
+            }
             pendingPool.release(call);
         }
     }

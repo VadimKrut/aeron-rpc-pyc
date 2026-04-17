@@ -405,6 +405,27 @@ Compare RX idle strategies:
 java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED -jar target/aeron-rpc-benchmarks.jar RpcChannelBenchmark.oneChannelEightThreads -p idleStrategy=YIELDING,BUSY_SPIN,BACKOFF
 ```
 
+Запустить rate-controlled RTT latency benchmark, похожий на Aeron echo benchmark:
+
+Run a rate-controlled RTT latency benchmark similar to the Aeron echo benchmark:
+
+```bash
+java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED -cp target/aeron-rpc-benchmarks.jar ru.pathcreator.pyc.bench.RpcLatencyHistogramMain --payload=32 --rate=100000 --threads=1 --burst-size=1 --warmup-iterations=5 --warmup-messages=25000 --measurement-iterations=10 --measurement-messages=100000 --handler=OFFLOAD --idle=YIELDING
+```
+
+Этот benchmark измеряет полный synchronous RPC round-trip: `RpcChannel.call(...)` отправляет запрос, server echo handler возвращает payload, caller получает и декодирует ответ. Режим closed-loop: один in-flight request на caller thread.
+
+This benchmark measures the full synchronous RPC round trip: `RpcChannel.call(...)` sends a request, the server echo handler returns the payload, and the caller receives and decodes the response. It is closed-loop: one in-flight request per caller thread.
+
+| Option | Meaning |
+|--------|---------|
+| `--payload` | request and response payload size in bytes |
+| `--rate` | target total request rate across all caller threads |
+| `--threads` | number of concurrent caller threads |
+| `--burst-size` | messages sent by each caller thread per pacing interval |
+| `--handler` | `DIRECT` or `OFFLOAD` server handler execution |
+| `--idle` | RX idle strategy: `YIELDING`, `BUSY_SPIN`, or `BACKOFF` |
+
 Сохранить результат в CSV:
 
 Save results to CSV:
