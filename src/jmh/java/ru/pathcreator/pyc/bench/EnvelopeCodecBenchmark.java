@@ -1,16 +1,7 @@
 package ru.pathcreator.pyc.bench;
 
 import org.agrona.concurrent.UnsafeBuffer;
-import org.openjdk.jmh.annotations.Benchmark;
-import org.openjdk.jmh.annotations.BenchmarkMode;
-import org.openjdk.jmh.annotations.Fork;
-import org.openjdk.jmh.annotations.Measurement;
-import org.openjdk.jmh.annotations.Mode;
-import org.openjdk.jmh.annotations.OutputTimeUnit;
-import org.openjdk.jmh.annotations.Scope;
-import org.openjdk.jmh.annotations.Setup;
-import org.openjdk.jmh.annotations.State;
-import org.openjdk.jmh.annotations.Warmup;
+import org.openjdk.jmh.annotations.*;
 import ru.pathcreator.pyc.envelope.Envelope;
 import ru.pathcreator.pyc.envelope.EnvelopeCodec;
 
@@ -60,10 +51,10 @@ public class EnvelopeCodecBenchmark {
     @Benchmark
     public long decodeFields(final EnvelopeState state) {
         return EnvelopeCodec.magic(state.buffer, 0)
-                + EnvelopeCodec.version(state.buffer, 0)
-                + EnvelopeCodec.messageTypeId(state.buffer, 0)
-                + EnvelopeCodec.correlationId(state.buffer, 0)
-                + EnvelopeCodec.flags(state.buffer, 0)
-                + EnvelopeCodec.payloadLength(state.buffer, 0);
+               + EnvelopeCodec.version(state.buffer, 0)
+               + EnvelopeCodec.messageTypeId(state.buffer, 0)
+               + EnvelopeCodec.correlationId(state.buffer, 0)
+               + EnvelopeCodec.flags(state.buffer, 0)
+               + EnvelopeCodec.payloadLength(state.buffer, 0);
     }
 }

@@ -1,47 +1,69 @@
 # aeron-rpc
 
-Synchronous request/response RPC over Aeron UDP, designed for **low-latency Java systems**.
+Синхронный request/response RPC поверх Aeron UDP для low-latency Java-систем.
 
-Provides a simple, blocking API (like HTTP), while keeping the internals optimized for throughput, minimal allocations,
-and predictable latency.
+Synchronous request/response RPC over Aeron UDP for low-latency Java systems.
+
+Библиотека дает простой blocking API в стиле обычного `call()`, но внутри ориентирована на throughput, минимальные аллокации и предсказуемую задержку.
+
+The library provides a simple blocking `call()` API while keeping the internals optimized for throughput, minimal allocations, and predictable latency.
 
 ---
 
-## Why this exists
+## Зачем это нужно / Why This Exists
 
-Most high-performance transports force you into async/reactive complexity.
+Многие high-performance транспорты заставляют писать async/reactive код даже там, где бизнес-логика естественно выглядит как request/response.
+
+Many high-performance transports force async/reactive code even when the business flow is naturally request/response.
+
+Проект стремится дать:
 
 This project aims to provide:
 
-* **Synchronous API** — simple `call()` model
-* **Low latency** — ~15–40 µs p50 on localhost
-* **Aeron-based transport** — UDP, no HTTP overhead
-* **Pluggable serialization** — SBE / Kryo / Protobuf / raw bytes
+* **Синхронный API / Synchronous API** - простая модель `call()`.
+* **Низкую задержку / Low latency** - ориентир на десятки микросекунд на localhost.
+* **Aeron transport** - UDP без HTTP-overhead.
+* **Подключаемую сериализацию / Pluggable serialization** - SBE, Kryo, Protobuf или raw bytes.
 
 ---
 
-## When to use
+## Когда использовать / When to Use
+
+Хорошо подходит:
 
 Good fit:
 
-* internal microservices with strict latency requirements
-* trading / fintech systems
-* request/response flows where simplicity matters
+* внутренние microservices с жесткими требованиями к latency;
+* trading / fintech / market-data системы;
+* request/response сценарии, где важна простота API;
+* локальные или private-network сервисы, где инфраструктура контролируется пользователем.
+
+* internal microservices with strict latency requirements;
+* trading, fintech, and market-data systems;
+* request/response flows where API simplicity matters;
+* local or private-network services where infrastructure is controlled by the user.
+
+Не лучший выбор:
 
 Not a good fit:
 
-* large payload transfer (>16MB)
-* public APIs
-* service mesh replacement
+* передача больших payload-ов как основная задача;
+* публичные интернет-API без отдельного security-layer;
+* замена service mesh;
+* сценарии, где HTTP/gRPC удобнее важнее, чем latency.
+
+* large payload transfer as the main workload;
+* public internet APIs without a separate security layer;
+* service mesh replacement;
+* cases where HTTP/gRPC convenience matters more than latency.
 
 ---
 
-## Installation
+## Установка / Installation
 
-### Maven (GitVerse)
+### Maven через GitVerse / Maven via GitVerse
 
 ```xml
-
 <repositories>
     <repository>
         <id>gitverse</id>
@@ -50,17 +72,35 @@ Not a good fit:
 </repositories>
 
 <dependencies>
-<dependency>
-    <groupId>ru.pathcreator.pyc</groupId>
-    <artifactId>aeron-rpc</artifactId>
-    <version>1.0.2-SNAPSHOT</version>
-</dependency>
+    <dependency>
+        <groupId>ru.pathcreator.pyc</groupId>
+        <artifactId>aeron-rpc</artifactId>
+        <version>0.0.1</version>
+    </dependency>
 </dependencies>
 ```
 
-### Maven (GitHub Packages)
+### Maven через GitHub Packages / Maven via GitHub Packages
 
-Then use the GitHub Packages repository:
+GitHub Packages требует авторизацию даже для скачивания Maven-пакетов. Добавьте GitHub token с правом `read:packages` в Maven `settings.xml`.
+
+GitHub Packages requires authentication even for consuming Maven packages. Add a GitHub token with `read:packages` to Maven `settings.xml`.
+
+```xml
+<settings>
+    <servers>
+        <server>
+            <id>github</id>
+            <username>YOUR_GITHUB_USERNAME</username>
+            <password>YOUR_GITHUB_TOKEN</password>
+        </server>
+    </servers>
+</settings>
+```
+
+Затем добавьте GitHub Packages repository и dependency.
+
+Then add the GitHub Packages repository and dependency.
 
 ```xml
 <repositories>
@@ -77,85 +117,271 @@ Then use the GitHub Packages repository:
     <dependency>
         <groupId>ru.pathcreator.pyc</groupId>
         <artifactId>aeron-rpc</artifactId>
-        <version>1.0.2-SNAPSHOT</version>
+        <version>0.0.1</version>
     </dependency>
 </dependencies>
 ```
 
 ---
 
-## Requirements
+## Требования / Requirements
 
 * Java 25+
 * Maven 3.9+
-* Aeron compatible environment
+* Aeron-compatible runtime environment
 
 ---
 
-## Tests and benchmarks
+## Быстрый старт / Quick Start
 
-### Unit tests
+### 1. Создать node / Create a node
 
-Run regular unit tests:
+```java
+RpcNode node = RpcNode.start(
+        NodeConfig.builder()
+                .aeronDir("/tmp/aeron")
+                .build()
+);
+```
+
+### 2. Создать channel / Create a channel
+
+```java
+RpcChannel channel = node.channel(
+        ChannelConfig.builder()
+                .localEndpoint("0.0.0.0:40101")
+                .remoteEndpoint("localhost:40102")
+                .streamId(1001)
+                .build()
+);
+```
+
+### 3. Зарегистрировать handler / Register a handler
+
+```java
+channel.onRequest(
+        1,
+        2,
+        new MyRequestCodec(),
+        new MyResponseCodec(),
+        req -> new MyResponse(req.id())
+);
+```
+
+### 4. Запустить channel / Start the channel
+
+```java
+channel.start();
+```
+
+### 5. Выполнить вызов / Make a call
+
+```java
+MyResponse response = channel.call(
+        1,
+        2,
+        new MyRequest(42),
+        new MyRequestCodec(),
+        new MyResponseCodec()
+);
+```
+
+---
+
+## Основные понятия / Core Concepts
+
+### RpcNode
+
+`RpcNode` владеет Aeron client, optional embedded MediaDriver, общим offload executor и списком открытых каналов.
+
+`RpcNode` owns the Aeron client, optional embedded MediaDriver, shared offload executor, and all opened channels.
+
+### RpcChannel
+
+`RpcChannel` - один двунаправленный RPC-канал: одна `Publication`, одна `Subscription`, один RX thread.
+
+`RpcChannel` is one bidirectional RPC channel: one `Publication`, one `Subscription`, and one RX thread.
+
+Вызовы из нескольких потоков безопасны. Ответы сопоставляются с запросами по transport correlation id, поэтому concurrent callers не получают чужие replies.
+
+Calls from multiple threads are safe. Responses are matched to requests by transport correlation id, so concurrent callers do not receive each other's replies.
+
+### MessageCodec
+
+`MessageCodec` - пользовательский слой сериализации.
+
+`MessageCodec` is the user-defined serialization layer.
+
+```java
+interface MessageCodec<T> {
+    int encode(T message, MutableDirectBuffer buffer, int offset);
+
+    T decode(DirectBuffer buffer, int offset, int length);
+}
+```
+
+### RawRequestHandler
+
+`RawRequestHandler` - zero-alloc server path: handler получает raw bytes и заранее выделенный response buffer.
+
+`RawRequestHandler` is a zero-alloc server path: the handler receives raw bytes and a preallocated response buffer.
+
+---
+
+## Конфигурация / Configuration
+
+Главные настройки: где выполняется handler, как idle-ит RX thread и что делать при backpressure.
+
+The main choices are where the handler runs, how the RX thread idles, and what happens under backpressure.
+
+### Handler execution
+
+| Setting | Где выполняется / Where it runs | Когда использовать / Use when |
+|---------|----------------------------------|-------------------------------|
+| default, no `offloadExecutor` | virtual thread | handler делает I/O и не должен блокировать RX thread / handler does I/O and should not block RX |
+| `.offloadExecutor(myPool)` | custom `ExecutorService` | CPU-heavy handlers или свой scheduler / CPU-heavy handlers or custom scheduling |
+| `.offloadExecutor(ChannelConfig.DIRECT_EXECUTOR)` | прямо в RX thread / directly in RX thread | ultra-fast handlers, ACK, in-memory lookup |
+
+`DIRECT_EXECUTOR` убирает payload copy и executor dispatch, но медленный handler блокирует прием сообщений.
+
+`DIRECT_EXECUTOR` skips payload copy and executor dispatch, but a slow handler blocks receive processing.
+
+### RX idle strategy
+
+| Strategy | CPU при idle / Idle CPU | Задержка после idle / Latency after idle | Когда использовать / Use when |
+|----------|--------------------------|-------------------------------------------|-------------------------------|
+| `YIELDING` | около одного ядра / about one core | минимальная / minimal | low-latency default |
+| `BUSY_SPIN` | одно ядро постоянно / one full core | минимальная, fastest hot loop / minimal, fastest hot loop | maximum latency tuning |
+| `BACKOFF` | низкая / low | может быть выше / can be higher | mostly-idle channels, CPU-sensitive hosts |
+
+### Backpressure
+
+| Policy | Поведение / Behavior | Когда использовать / Use when |
+|--------|----------------------|-------------------------------|
+| `BLOCK` | caller ждет accept или `offerTimeout` / caller waits until accepted or timeout | обычный RPC / normal RPC |
+| `FAIL_FAST` | сразу `BackpressureException` / immediate `BackpressureException` | caller имеет retry/fallback |
+
+---
+
+## Рецепты / Recipes
+
+### Минимальная задержка / Minimum latency
+
+```java
+ChannelConfig.builder()
+        .localEndpoint("...")
+        .remoteEndpoint("...")
+        .streamId(1001)
+        .offloadExecutor(ChannelConfig.DIRECT_EXECUTOR)
+        .rxIdleStrategy(IdleStrategyKind.BUSY_SPIN)
+        .build();
+```
+
+### Обычный I/O handler / Typical I/O handler
+
+```java
+ChannelConfig.builder()
+        .localEndpoint("...")
+        .remoteEndpoint("...")
+        .streamId(1002)
+        .rxIdleStrategy(IdleStrategyKind.YIELDING)
+        .build();
+```
+
+### Mostly-idle channel
+
+```java
+ChannelConfig.builder()
+        .localEndpoint("...")
+        .remoteEndpoint("...")
+        .streamId(1003)
+        .rxIdleStrategy(IdleStrategyKind.BACKOFF)
+        .build();
+```
+
+---
+
+## Тесты и документация / Tests and Documentation
+
+Запустить unit tests:
+
+Run unit tests:
 
 ```bash
 mvn test
 ```
 
-Run the full verification lifecycle, including compilation, unit tests, source jar and Javadoc jar:
+Запустить полный verification lifecycle, включая tests, sources jar и Javadoc jar:
+
+Run the full verification lifecycle, including tests, sources jar, and Javadoc jar:
 
 ```bash
 mvn clean verify
 ```
 
-On Java 25 the tests need module access for Agrona internals. The required JVM option is already configured
-for Maven Surefire in `pom.xml`:
+Сгенерировать Javadoc:
 
-```text
---add-exports java.base/jdk.internal.misc=ALL-UNNAMED
-```
-
-### Javadoc
-
-Generate API documentation:
+Generate Javadoc:
 
 ```bash
 mvn javadoc:javadoc
 ```
 
-The generated documentation is written to:
+Javadoc будет создан в:
+
+Javadoc is written to:
 
 ```text
 target/reports/apidocs
 ```
 
-### JMH benchmarks
+На Java 25 для Agrona требуется доступ к internal API. Для unit tests это уже настроено в Maven Surefire.
 
-Make sure Maven runs on JDK 25:
+On Java 25, Agrona requires access to internal APIs. This is already configured for unit tests through Maven Surefire.
+
+```text
+--add-exports java.base/jdk.internal.misc=ALL-UNNAMED
+```
+
+---
+
+## Benchmarks
+
+Убедитесь, что Maven использует JDK 25.
+
+Make sure Maven runs on JDK 25.
 
 ```bash
 mvn -version
 ```
 
-If Maven prints an older Java version on Windows PowerShell, set `JAVA_HOME` for the current terminal:
+На Windows PowerShell, если Maven использует старый JDK, задайте `JAVA_HOME` для текущей сессии.
+
+On Windows PowerShell, if Maven uses an older JDK, set `JAVA_HOME` for the current session.
 
 ```powershell
-$env:JAVA_HOME = "...\.jdks\openjdk-ea-25+36-3489"
+$env:JAVA_HOME = "PATH_TO_JDK_25"
 $env:Path = "$env:JAVA_HOME\bin;$env:Path"
 mvn -version
 ```
 
-Build the benchmark jar:
+Собрать JMH benchmark jar:
+
+Build the JMH benchmark jar:
 
 ```bash
 mvn -Pbenchmarks -DskipTests clean package
 ```
 
-Run all RPC channel benchmarks:
+Запустить все RPC benchmarks:
+
+Run all RPC benchmarks:
 
 ```bash
 java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED -jar target/aeron-rpc-benchmarks.jar RpcChannelBenchmark
 ```
+
+Запустить один сценарий:
 
 Run one focused scenario:
 
@@ -163,11 +389,15 @@ Run one focused scenario:
 java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED -jar target/aeron-rpc-benchmarks.jar RpcChannelBenchmark.oneChannelEightThreads
 ```
 
-Limit benchmark parameters for a shorter run:
+Ограничить параметры:
+
+Limit parameters:
 
 ```bash
 java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED -jar target/aeron-rpc-benchmarks.jar RpcChannelBenchmark.oneChannelEightThreads -p handlerMode=DIRECT -p payloadSize=256 -p idleStrategy=YIELDING
 ```
+
+Сравнить RX idle strategies:
 
 Compare RX idle strategies:
 
@@ -175,32 +405,35 @@ Compare RX idle strategies:
 java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED -jar target/aeron-rpc-benchmarks.jar RpcChannelBenchmark.oneChannelEightThreads -p idleStrategy=YIELDING,BUSY_SPIN,BACKOFF
 ```
 
-Save benchmark results to CSV:
+Сохранить результат в CSV:
+
+Save results to CSV:
 
 ```bash
 java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED -jar target/aeron-rpc-benchmarks.jar RpcChannelBenchmark -rf csv -rff target/jmh-rpc.csv
 ```
 
-In WSL/Linux use `/` in paths, for example `target/aeron-rpc-benchmarks.jar`.
-The Windows-style path `target\aeron-rpc-benchmarks.jar` is not valid there.
+В WSL/Linux используйте `/` в путях, например `target/aeron-rpc-benchmarks.jar`.
 
-The RPC benchmark parameters are:
+In WSL/Linux, use `/` in paths, for example `target/aeron-rpc-benchmarks.jar`.
 
-| Parameter      | Values                         | Meaning                         |
-|----------------|--------------------------------|---------------------------------|
-| `handlerMode`  | `DIRECT`, `OFFLOAD`            | where server handlers run       |
-| `payloadSize`  | `16`, `256`, `1024`            | request and response size       |
-| `idleStrategy` | `YIELDING`, `BUSY_SPIN`, `BACKOFF` | RX thread idle strategy      |
+### Benchmark parameters
+
+| Parameter | Values | Meaning |
+|-----------|--------|---------|
+| `handlerMode` | `DIRECT`, `OFFLOAD` | where server handlers run |
+| `payloadSize` | `16`, `256`, `1024` | request and response payload size |
+| `idleStrategy` | `YIELDING`, `BUSY_SPIN`, `BACKOFF` | RX thread idle strategy |
 
 ### Reference benchmark results
 
-These are example local results from a WSL run on Java 25. Treat them as a reference point, not as a portable
-guarantee: Aeron performance depends heavily on CPU, OS scheduler, power mode, MediaDriver placement and whether
-the benchmark runs on a native Linux filesystem or under `/mnt/c`.
+Это пример локального запуска в WSL на Java 25. Это ориентир, а не переносимая гарантия: результаты зависят от CPU, OS scheduler, power mode, MediaDriver placement и filesystem.
 
-JMH reports `Score` as throughput in operations per second. The `Error` column is not a test failure; it is the
-statistical confidence interval for the measured score. A large `Error` means the result was noisy and should be
-rerun with more iterations or a cleaner environment before drawing strong conclusions.
+These are example local results from a WSL run on Java 25. Treat them as a reference point, not as a portable guarantee: results depend on CPU, OS scheduler, power mode, MediaDriver placement, and filesystem.
+
+`Score` - throughput в operations per second. `Error` - не ошибка теста, а статистический confidence interval. Большой `Error` означает шумный результат.
+
+`Score` is throughput in operations per second. `Error` is not a test failure; it is the statistical confidence interval. A large `Error` means the result was noisy.
 
 | Benchmark | Handler | RX idle | Payload | Score, ops/s | Error, ops/s |
 |-----------|---------|---------|---------|--------------|--------------|
@@ -259,216 +492,79 @@ rerun with more iterations or a cleaner environment before drawing strong conclu
 | `oneChannelOneThread` | OFFLOAD | BACKOFF | 256 B | 10,522.227 | 738.932 |
 | `oneChannelOneThread` | OFFLOAD | BACKOFF | 1024 B | 10,484.348 | 586.815 |
 
-Practical reading of these numbers:
+### Как читать результаты / How to Read the Results
 
-* `DIRECT` is best for very fast handlers because it avoids offload queueing and payload copying.
+* `DIRECT` лучше для очень быстрых handlers, потому что убирает offload queueing и payload copy.
+* `OFFLOAD` безопаснее для blocking или slow handlers, потому что защищает RX thread от пользовательского кода.
+* `YIELDING` - хороший low-latency default.
+* `BUSY_SPIN` может быть немного быстрее в hot loop, но постоянно расходует CPU.
+* `BACKOFF` экономит CPU при idle, но может снизить throughput и увеличить latency после idle.
+* Больше каналов не всегда означает больше throughput в одном процессе: RX threads, embedded MediaDriver и OS scheduler могут стать bottleneck.
+
+* `DIRECT` is best for very fast handlers because it avoids offload queueing and payload copy.
 * `OFFLOAD` is safer for blocking or slow handlers because it protects the RX thread from user code.
-* `YIELDING` is the default low-latency choice and performed well in the one-channel tests.
-* `BUSY_SPIN` can be slightly faster or more stable in some hot-loop cases, but it burns CPU constantly.
-* `BACKOFF` saves CPU while idle, but it can reduce throughput and add latency after idle periods.
-* More channels do not automatically mean more throughput in one process: extra RX threads, shared embedded
-  MediaDriver work and scheduler contention can dominate the measurement.
-
----
+* `YIELDING` is a good low-latency default.
+* `BUSY_SPIN` can be slightly faster in hot loops, but it burns CPU continuously.
+* `BACKOFF` saves CPU while idle, but can reduce throughput and add latency after idle periods.
+* More channels do not always mean more throughput in one process: RX threads, embedded MediaDriver, and the OS scheduler can become bottlenecks.
 
 ### I/O handler recommendation
 
+Для I/O-bound handlers используйте `OFFLOAD + YIELDING`.
+
 For I/O-bound handlers, use `OFFLOAD + YIELDING`.
+
+`OFFLOAD` не дает blocking user code остановить RX thread, а `YIELDING` остается хорошим low-latency default для receive loop.
 
 `OFFLOAD` keeps blocking user code away from the RX thread, while `YIELDING` remains a good low-latency default for the receive loop.
 
+По benchmark-ам на 1024-byte payload ожидаемый transport overhead:
+
 Based on the 1024-byte benchmark results, the expected transport overhead is approximately:
 
-* `~8 us` per round-trip with one caller thread;
-* `~60-65 us` average round-trip latency with eight concurrent caller threads.
+* `~8 us` на round-trip с одним caller thread / per round-trip with one caller thread;
+* `~60-65 us` average round-trip latency с восемью concurrent caller threads / with eight concurrent caller threads.
 
-Real database, HTTP, file-system or network work should be added on top of this transport overhead.
+Реальная работа с database, HTTP, filesystem или сетью добавляется сверху.
 
-
-## Quick Start
-
-### 1. Create node
-
-```java
-RpcNode node = RpcNode.start(
-        NodeConfig.builder()
-                .aeronDir("/tmp/aeron")
-                .build()
-);
-```
-
-### 2. Create channel
-
-```java
-RpcChannel channel = node.channel(
-        ChannelConfig.builder()
-                .localEndpoint("0.0.0.0:40101")
-                .remoteEndpoint("localhost:40102")
-                .streamId(1001)
-                .build()
-);
-```
-
-### 3. Register handler
-
-```java
-channel.onRequest(
-                1,
-                2,
-                new MyRequestCodec(),
-                new MyResponseCodec(),
-                req ->new MyResponse(req.id)
-        );
-```
-
-### 4. Start
-
-```java
-channel.start();
-```
-
-### 5. Call
-
-```java
-MyResponse resp = channel.call(
-        1, 2,
-        new MyRequest(42),
-        new MyRequestCodec(),
-        new MyResponseCodec()
-);
-```
+Real database, HTTP, filesystem, or network work should be added on top.
 
 ---
 
-## Core Concepts
+## Дизайн производительности / Performance Design
 
-### RpcNode
+* Нет sender thread: caller напрямую вызывает `tryClaim` на `ConcurrentPublication`.
+* `tryClaim` fast-path для сообщений `<= maxPayloadLength`; `offer` fallback для больших сообщений.
+* Thread-local direct staging buffers.
+* Pooled `PendingCall`, `OffloadTask` и copy buffers.
+* Primitive maps без boxing.
+* 3-phase sync wait: spin, yield, park.
+* MediaDriver в `SHARED` threading mode.
 
-* one Aeron MediaDriver (shared threading mode by default)
-* multiple channels
-* shared virtual-thread executor for server handlers
-
-### RpcChannel
-
-* one Publication + one Subscription
-* one RX thread
-* caller writes directly via `tryClaim` (no sender thread)
-* concurrent calls from multiple threads / virtual threads are safe
-* responses are matched to requests by transport correlation id, so concurrent callers do not receive each other's replies
-
-### MessageCodec
-
-User-defined serialization layer:
-
-```java
-interface MessageCodec<T> {
-    int encode(T msg, MutableDirectBuffer buffer, int offset);
-
-    T decode(DirectBuffer buffer, int offset, int length);
-}
-```
-
-### RawRequestHandler
-
-Zero-alloc server path — handler gets raw bytes + pre-allocated response buffer, returns bytes-written.
-Use when decode-to-POJO + encode overhead matters.
+* No sender thread: caller invokes `tryClaim` directly on a `ConcurrentPublication`.
+* `tryClaim` fast path for messages `<= maxPayloadLength`; `offer` fallback for larger messages.
+* Thread-local direct staging buffers.
+* Pooled `PendingCall`, `OffloadTask`, and copy buffers.
+* Primitive maps without boxing.
+* 3-phase sync wait: spin, yield, park.
+* MediaDriver uses `SHARED` threading mode.
 
 ---
 
-## Choosing configuration
+## Ограничения / Limitations
 
-Two main knobs: **where the handler runs** and **how the RX thread idles**.
+* Нет auto-reconnect; channel fail-fast через heartbeat.
+* Default max payload: 16 MiB.
+* `DIRECT_EXECUTOR` блокирует RX thread на время handler-а.
+* Библиотека не предоставляет authentication, authorization или encryption; это зона ответственности приложения или инфраструктуры.
 
-### Handler execution
-
-| Setting                                           | Where handler runs     | Use when                                                 |
-|---------------------------------------------------|------------------------|----------------------------------------------------------|
-| default (no `offloadExecutor`)                    | virtual thread         | handler does I/O (DB/HTTP/files) — won't block RX        |
-| `.offloadExecutor(myPool)`                        | your `ExecutorService` | CPU-heavy handlers — avoid virtual-thread scheduler cost |
-| `.offloadExecutor(ChannelConfig.DIRECT_EXECUTOR)` | directly in RX thread  | ultra-fast handlers (<5 µs), e.g. ACK, in-memory lookup  |
-
-`DIRECT_EXECUTOR` skips the payload copy and dispatch — lowest latency, but a slow handler stalls RX for all callers.
-
-### RX idle strategy
-
-| Strategy             | CPU (idle)      | Latency hit after idle | Use when                                    |
-|----------------------|-----------------|------------------------|---------------------------------------------|
-| `YIELDING` (default) | ~100% of 1 core | none                   | low-latency default                         |
-| `BUSY_SPIN`          | ~100% of 1 core | none (fastest)         | you need every microsecond                  |
-| `BACKOFF`            | ~0% when idle   | ~1 ms first message    | mostly-idle channels, CPU-constrained hosts |
-
-### Backpressure
-
-Applied when the publication is BACK_PRESSURED longer than `offerTimeout`.
-
-| Policy            | Behavior                                              | Use when                                     |
-|-------------------|-------------------------------------------------------|----------------------------------------------|
-| `BLOCK` (default) | caller waits until accepted or `offerTimeout` expires | normal RPC — "request waits, like HTTP"      |
-| `FAIL_FAST`       | throws `BackpressureException` immediately            | low-latency, caller has retry/fallback logic |
+* No auto-reconnect; the channel fails fast through heartbeat.
+* Default max payload: 16 MiB.
+* `DIRECT_EXECUTOR` blocks the RX thread while the handler runs.
+* The library does not provide authentication, authorization, or encryption; these belong to the application or infrastructure layer.
 
 ---
 
-## Recipes
-
-### Max-throughput / min-latency (ACK-style handler)
-
-```java
-ChannelConfig
-        .builder()
-        .localEndpoint("...")
-        .remoteEndpoint("...")
-        .streamId(1001)
-        .offloadExecutor(ChannelConfig.DIRECT_EXECUTOR)
-        .rxIdleStrategy(IdleStrategyKind.BUSY_SPIN)
-        .build();
-```
-
-### Typical I/O handler (DB, HTTP calls)
-
-```java
-ChannelConfig
-        .builder()
-        .localEndpoint("...")
-        .remoteEndpoint("...")
-        .streamId(1002)
-        .rxIdleStrategy(IdleStrategyKind.YIELDING)
-        .build();
-```
-
-### Mostly-idle channel, CPU-constrained host
-
-```java
-ChannelConfig
-        .builder()
-        .localEndpoint("...")
-        .remoteEndpoint("...")
-        .streamId(1003)
-        .rxIdleStrategy(IdleStrategyKind.BACKOFF)
-        .build();
-```
-
----
-
-## Performance design
-
-* no sender thread — caller invokes `tryClaim` directly on a `ConcurrentPublication`
-* `tryClaim` fast-path for all messages ≤ MTU; `offer` fallback for larger
-* thread-local direct staging buffers — no per-call allocations in the hot path
-* pooled `PendingCall`, `OffloadTask`, copy buffers (Agrona lock-free queues)
-* primitive maps (`Long2ObjectHashMap`, `Int2ObjectHashMap`) — no boxing
-* 3-phase sync wait: spin → yield → park (avoids Windows timer penalty)
-* MediaDriver in `SHARED` threading mode — 1 driver thread, not 3
-
----
-
-## Limitations
-
-* no auto-reconnect (failfast via heartbeat instead)
-* max payload: 16MB (`LargePayloadRpcChannel` placeholder for future)
-* `DIRECT_EXECUTOR` handlers block RX — use only for truly fast handlers
-
----
-
-## License
+## Лицензия / License
 
 Apache License 2.0
