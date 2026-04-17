@@ -75,7 +75,7 @@ Not a good fit:
     <dependency>
         <groupId>ru.pathcreator.pyc</groupId>
         <artifactId>aeron-rpc</artifactId>
-        <version>0.0.3</version>
+        <version>0.0.4</version>
     </dependency>
 </dependencies>
 ```
@@ -117,7 +117,7 @@ Then add the GitHub Packages repository and dependency.
     <dependency>
         <groupId>ru.pathcreator.pyc</groupId>
         <artifactId>aeron-rpc</artifactId>
-        <version>0.0.3</version>
+        <version>0.0.4</version>
     </dependency>
 </dependencies>
 ```
