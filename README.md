@@ -53,7 +53,7 @@ Not a good fit:
 <dependency>
     <groupId>ru.pathcreator.pyc</groupId>
     <artifactId>aeron-rpc</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>1.0.2-SNAPSHOT</version>
 </dependency>
 </dependencies>
 ```
@@ -96,16 +96,12 @@ RpcChannel channel = node.channel(
 
 ```java
 channel.onRequest(
-        1,2,
+                1,
+                2,
                 new MyRequestCodec(),
-        new
-
-MyResponseCodec(),
-
-req ->new
-
-MyResponse(req.id)
-);
+                new MyResponseCodec(),
+                req ->new MyResponse(req.id)
+        );
 ```
 
 ### 4. Start
@@ -199,68 +195,38 @@ Applied when the publication is BACK_PRESSURED longer than `offerTimeout`.
 ### Max-throughput / min-latency (ACK-style handler)
 
 ```java
-ChannelConfig.builder()
-        .
-
-localEndpoint("...")
-        .
-
-remoteEndpoint("...")
-        .
-
-streamId(1001)
-        .
-
-offloadExecutor(ChannelConfig.DIRECT_EXECUTOR)
-        .
-
-rxIdleStrategy(IdleStrategyKind.BUSY_SPIN)
-        .
-
-build();
+ChannelConfig
+        .builder()
+        .localEndpoint("...")
+        .remoteEndpoint("...")
+        .streamId(1001)
+        .offloadExecutor(ChannelConfig.DIRECT_EXECUTOR)
+        .rxIdleStrategy(IdleStrategyKind.BUSY_SPIN)
+        .build();
 ```
 
 ### Typical I/O handler (DB, HTTP calls)
 
 ```java
-ChannelConfig.builder()
-        .
-
-localEndpoint("...")
-        .
-
-remoteEndpoint("...")
-        .
-
-streamId(1002)
-// offloadExecutor default = node virtual threads
-        .
-
-rxIdleStrategy(IdleStrategyKind.YIELDING)
-        .
-
-build();
+ChannelConfig
+        .builder()
+        .localEndpoint("...")
+        .remoteEndpoint("...")
+        .streamId(1002)
+        .rxIdleStrategy(IdleStrategyKind.YIELDING)
+        .build();
 ```
 
 ### Mostly-idle channel, CPU-constrained host
 
 ```java
-ChannelConfig.builder()
-        .
-
-localEndpoint("...")
-        .
-
-remoteEndpoint("...")
-        .
-
-streamId(1003)
-        .
-
-rxIdleStrategy(IdleStrategyKind.BACKOFF)
-        .
-
-build();
+ChannelConfig
+        .builder()
+        .localEndpoint("...")
+        .remoteEndpoint("...")
+        .streamId(1003)
+        .rxIdleStrategy(IdleStrategyKind.BACKOFF)
+        .build();
 ```
 
 ---
@@ -282,22 +248,6 @@ build();
 * no auto-reconnect (failfast via heartbeat instead)
 * max payload: 16MB (`LargePayloadRpcChannel` placeholder for future)
 * `DIRECT_EXECUTOR` handlers block RX — use only for truly fast handlers
-* logging is minimal (System.err)
-
----
-
-## Roadmap
-
-* reconnect / channel supervision
-* metrics (counters, latency histograms)
-* large payload support
-* better logging integration
-
----
-
-## Status
-
-Early public release. API may change before stable version.
 
 ---
 

@@ -18,8 +18,16 @@ package ru.pathcreator.pyc;
  * маленьких сообщений с тяжёлой механикой больших.
  * <p>
  * Сейчас — не реализован. Намеренно оставлен как маркер-namespace.
+ *
+ * <p>Stub namespace for a future channel dedicated to payloads larger than
+ * 16 MiB. It is intentionally not implemented yet.</p>
  */
 public final class LargePayloadRpcChannel {
+    /**
+     * Запрещает создание экземпляров, пока канал больших payload не реализован.
+     *
+     * <p>Prevents instantiation until the large payload channel is implemented.</p>
+     */
     private LargePayloadRpcChannel() {
         throw new UnsupportedOperationException("not implemented yet");
     }

@@ -36,6 +36,10 @@ import java.util.concurrent.Executors;
  * // параллельные клиентские вызовы с виртуалок ...
  * <p>
  * node.close();   // закроет все каналы, клиент, driver, executor.
+ *
+ * <p>Root RPC object for one process. It owns the Aeron client, optionally an
+ * embedded MediaDriver, the shared offload executor, and all channels created
+ * through this node.</p>
  */
 public final class RpcNode implements AutoCloseable {
 
@@ -50,6 +54,14 @@ public final class RpcNode implements AutoCloseable {
         this.offloadExecutor = exec;
     }
 
+    /**
+     * Запускает RPC-узел с заданной конфигурацией.
+     *
+     * <p>Starts an RPC node using the provided configuration.</p>
+     *
+     * @param config конфигурация узла / node configuration
+     * @return запущенный RPC-узел / started RPC node
+     */
     public static RpcNode start(final NodeConfig config) {
         ensureAeronDirParent(config.aeronDir());
         final MediaDriver driver;
@@ -84,7 +96,6 @@ public final class RpcNode implements AutoCloseable {
             aeronDirName = config.aeronDir();
         }
         final Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(aeronDirName));
-
         // Общий executor виртуальных потоков для всех OFFLOAD-handler-ов всех каналов.
         // Шарится намеренно: уменьшает число carrier-ов и упрощает lifecycle.
         final ExecutorService exec = Executors.newVirtualThreadPerTaskExecutor();
@@ -96,6 +107,12 @@ public final class RpcNode implements AutoCloseable {
      * после чего вызывается channel.start().
      * <p>
      * Канал автоматически добавляется в список для close-в-каскаде.
+     *
+     * <p>Creates a new channel and adds it to the node-owned channel list so it
+     * can be closed together with the node.</p>
+     *
+     * @param channelConfig конфигурация канала / channel configuration
+     * @return новый RPC-канал / new RPC channel
      */
     public RpcChannel channel(final ChannelConfig channelConfig) {
         final RpcChannel ch = new RpcChannel(channelConfig, aeron, offloadExecutor);
@@ -103,6 +120,11 @@ public final class RpcNode implements AutoCloseable {
         return ch;
     }
 
+    /**
+     * Закрывает все каналы, Aeron-клиент, MediaDriver и общий executor.
+     *
+     * <p>Closes all channels, the Aeron client, MediaDriver, and shared executor.</p>
+     */
     @Override
     public void close() {
         for (final RpcChannel ch : channels) {

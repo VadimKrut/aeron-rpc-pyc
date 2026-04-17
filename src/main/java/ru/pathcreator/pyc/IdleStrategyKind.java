@@ -3,7 +3,7 @@ package ru.pathcreator.pyc;
 /**
  * Выбор idle-стратегии для sender / rx тредов канала.
  *
- * <h3>Почему это важно на Windows</h3>
+ * <h2>Почему это важно на Windows</h2>
  * <p>
  * На Windows стандартная разрешающая способность таймера — ~15.6 ms.
  * Это значит {@code LockSupport.parkNanos(x)} для любого {@code x > 0}
@@ -17,7 +17,7 @@ package ru.pathcreator.pyc;
  * round-trip (sender A → rx B → rx A) это может дать суммарно 3+ ms —
  * именно то, что наблюдалось в бенчмарках с p50 ≈ 3 ms на localhost.
  *
- * <h3>Trade-off</h3>
+ * <h2>Trade-off</h2>
  *
  * <ul>
  *  <li>{@link #BUSY_SPIN} — самый быстрый (все CPU циклы на poll), но
@@ -37,7 +37,24 @@ package ru.pathcreator.pyc;
  * потому что там parkNanos работает с наносекундной точностью.
  */
 public enum IdleStrategyKind {
+    /**
+     * Постоянный busy-spin без park/yield.
+     *
+     * <p>Continuous busy spin without park or yield.</p>
+     */
     BUSY_SPIN,
+
+    /**
+     * Yield при простое без parkNanos.
+     *
+     * <p>Yields while idle without using parkNanos.</p>
+     */
     YIELDING,
+
+    /**
+     * Backoff-стратегия Agrona: spin, затем yield, затем park.
+     *
+     * <p>Agrona backoff strategy: spin, then yield, then park.</p>
+     */
     BACKOFF
 }

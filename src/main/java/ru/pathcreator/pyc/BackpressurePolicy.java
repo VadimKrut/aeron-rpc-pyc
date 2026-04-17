@@ -8,6 +8,9 @@ package ru.pathcreator.pyc;
  * запрос/ответ они почти всегда вредны: caller ждёт ответа — если мы
  * "молча дропнем" или "вытесним" его запрос, он всё равно упадёт по
  * таймауту.</p>
+ *
+ * <p>Defines what the RPC channel should do when an Aeron publication stays
+ * back-pressured longer than {@code offerTimeout}.</p>
  */
 public enum BackpressurePolicy {
 
@@ -27,6 +30,8 @@ public enum BackpressurePolicy {
      *
      * <p>Для сервисов где важнее быстро отказать и дать caller-у
      * сделать fallback, чем замедлять RPC-путь под нагрузкой.</p>
+     *
+     * <p>Fails immediately when the first offer attempt reports backpressure.</p>
      */
     FAIL_FAST
 }
