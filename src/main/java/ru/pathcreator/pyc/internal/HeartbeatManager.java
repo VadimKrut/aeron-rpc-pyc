@@ -5,20 +5,16 @@ import java.util.concurrent.locks.LockSupport;
 import java.util.function.LongConsumer;
 
 /**
- * Поддержка heartbeat-состояния канала.
- * <p>
- * Обязанности:
- * 1. Периодически (heartbeatIntervalNs) отправлять heartbeat-envelope через
- * переданный LongConsumer (callback — "отправь heartbeat сейчас").
- * 2. Принимать notification о получении heartbeat (onHeartbeatReceived())
- * — обновляет lastReceivedNanos.
- * 3. Детектить DOWN: если (now - lastReceivedNanos) &gt; missedLimit * interval
- * — вызвать downCallback ровно один раз до следующего UP.
- * 4. Детектить UP: если был DOWN и вдруг снова пришёл heartbeat — вызвать
- * upCallback.
- * <p>
- * Используется RpcChannel-ом для failfast pending calls и для блокировки
- * новых call-ов когда канал DOWN.
+ * Управляет heartbeat-состоянием RPC-канала.
+ *
+ * <p>Менеджер периодически отправляет heartbeat-кадры, принимает уведомления
+ * о входящих heartbeat-кадрах и переводит канал между состояниями UP и DOWN.
+ * При переходе в DOWN он вызывает callback отказа, а при восстановлении входящих
+ * heartbeat-кадров вызывает callback подъема.</p>
+ *
+ * <p>Manages heartbeat state for an RPC channel. It periodically sends heartbeat
+ * frames, tracks incoming heartbeat notifications, and switches the channel
+ * between UP and DOWN states.</p>
  */
 public final class HeartbeatManager {
 
@@ -33,6 +29,19 @@ public final class HeartbeatManager {
     private volatile long lastReceivedNanos = 0L;
     private final AtomicBoolean running = new AtomicBoolean(false);
 
+    /**
+     * Создает менеджер heartbeat-состояния.
+     *
+     * <p>Creates a heartbeat state manager.</p>
+     *
+     * @param name          имя канала для служебного потока / channel name for the worker thread
+     * @param intervalNs    период отправки heartbeat в наносекундах / heartbeat interval in nanoseconds
+     * @param missedLimit   допустимое число пропущенных heartbeat-интервалов / allowed missed heartbeat intervals
+     * @param sendHeartbeat callback отправки heartbeat, получает текущий {@code nanoTime} /
+     *                      heartbeat sender callback that receives current {@code nanoTime}
+     * @param onDown        callback перехода канала в DOWN / callback invoked when the channel goes DOWN
+     * @param onUp          callback перехода канала в UP / callback invoked when the channel goes UP
+     */
     public HeartbeatManager(
             final String name,
             final long intervalNs,
@@ -50,6 +59,11 @@ public final class HeartbeatManager {
         this.thread.setDaemon(true);
     }
 
+    /**
+     * Запускает фоновый heartbeat-поток.
+     *
+     * <p>Starts the background heartbeat thread.</p>
+     */
     public void start() {
         if (!running.compareAndSet(false, true)) {
             throw new IllegalStateException("already started");
@@ -59,6 +73,11 @@ public final class HeartbeatManager {
         thread.start();
     }
 
+    /**
+     * Останавливает heartbeat-поток и ожидает его завершения.
+     *
+     * <p>Stops the heartbeat thread and waits for it to finish.</p>
+     */
     public void close() {
         running.set(false);
         LockSupport.unpark(thread);
@@ -69,6 +88,11 @@ public final class HeartbeatManager {
         }
     }
 
+    /**
+     * Отмечает получение heartbeat-кадра от удаленной стороны.
+     *
+     * <p>Marks that a heartbeat frame has been received from the remote side.</p>
+     */
     public void onHeartbeatReceived() {
         lastReceivedNanos = System.nanoTime();
         if (!connected) {
@@ -79,6 +103,14 @@ public final class HeartbeatManager {
         }
     }
 
+    /**
+     * Проверяет, считается ли удаленная сторона подключенной.
+     *
+     * <p>Checks whether the remote side is considered connected.</p>
+     *
+     * @return {@code true}, если heartbeat-состояние канала UP /
+     * {@code true} if the heartbeat state is UP
+     */
     public boolean isConnected() {
         return connected;
     }

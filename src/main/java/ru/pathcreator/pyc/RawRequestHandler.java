@@ -27,13 +27,27 @@ import org.agrona.MutableDirectBuffer;
  * это rx-буфер Aeron-а);
  * - в responseBuffer писать начиная с responseOffset и не дальше
  * responseOffset + responseCapacity.
+ *
+ * <p>Low-level zero-allocation server handler. It receives raw request bytes
+ * and writes raw response bytes directly into the provided response buffer.</p>
  */
 @FunctionalInterface
 public interface RawRequestHandler {
 
     /**
-     * @return число записанных байт в responseBuffer, ИЛИ &lt;= 0 чтобы
-     * не отвечать (one-way).
+     * Обрабатывает raw-запрос и записывает payload ответа.
+     *
+     * <p>Handles a raw request and writes the response payload.</p>
+     *
+     * @param requestBuffer    буфер с payload запроса / buffer containing the request payload
+     * @param requestOffset    смещение payload запроса / request payload offset
+     * @param requestLength    длина payload запроса в байтах / request payload length in bytes
+     * @param responseBuffer   буфер для payload ответа / buffer for the response payload
+     * @param responseOffset   смещение, с которого нужно писать ответ / offset where response writing starts
+     * @param responseCapacity доступная емкость для payload ответа / available response payload capacity
+     * @return число записанных байт в {@code responseBuffer}; значение {@code <= 0}
+     * означает one-way вызов без ответа /
+     * number of bytes written to {@code responseBuffer}; {@code <= 0} means no response
      */
     int handle(
             DirectBuffer requestBuffer,

@@ -5,7 +5,8 @@ import java.util.concurrent.locks.LockSupport;
 /**
  * Ожидание завершения {@link PendingCall} с таймаутом.
  *
- * <h3>Почему это нетривиально</h3>
+ * <h2>Почему это нетривиально</h2>
+ *
  * <p>
  * На Windows {@code LockSupport.parkNanos(x)} имеет минимальную
  * резолюцию ~15.6 ms (или ~1 ms если кто-то в процессе включил
@@ -13,7 +14,8 @@ import java.util.concurrent.locks.LockSupport;
  * {@code parkNanos(100_000)} (100 µs) на Windows реально спит 1 ms.
  * Для RPC с целевой latency 30-100 µs это разрушительно.
  *
- * <h3>Стратегия</h3>
+ * <h2>Стратегия</h2>
+ *
  * <p>
  * Hot path (ожидаемая latency &lt; 500 µs):
  * 1. Длинный {@code Thread.onSpinWait()} spin (до spinLimit).
@@ -29,7 +31,8 @@ import java.util.concurrent.locks.LockSupport;
  * медленный), платформенный поток уходит в park до unpark от rx-треда
  * или до истечения таймаута.
  *
- * <h3>CPU cost</h3>
+ * <h2>CPU cost</h2>
+ *
  * <p>
  * Spin-фаза тратит CPU на ожидающем треде. Для синхронного RPC это ровно
  * то что нужно — caller всё равно ничего не делает до получения ответа,
@@ -52,6 +55,15 @@ public final class SyncWaiter {
         this(20_000, 100, 1_000_000L);
     }
 
+    /**
+     * Создает ожидатель с явными лимитами spin/yield/park фаз.
+     *
+     * <p>Creates a waiter with explicit spin, yield, and park phase limits.</p>
+     *
+     * @param spinLimit  максимальное число spin-итераций / maximum number of spin iterations
+     * @param yieldLimit максимальное число yield-итераций / maximum number of yield iterations
+     * @param coldParkNs длительность cold-park ожидания в наносекундах / cold park duration in nanoseconds
+     */
     public SyncWaiter(final int spinLimit, final int yieldLimit, final long coldParkNs) {
         this.spinLimit = spinLimit;
         this.yieldLimit = yieldLimit;
@@ -59,7 +71,14 @@ public final class SyncWaiter {
     }
 
     /**
-     * @return true если call завершился в срок; false если таймаут.
+     * Ожидает завершения вызова до истечения таймаута.
+     *
+     * <p>Waits for a call to complete before the timeout expires.</p>
+     *
+     * @param call      ожидающий RPC-вызов / pending RPC call
+     * @param timeoutNs таймаут ожидания в наносекундах / timeout in nanoseconds
+     * @return {@code true}, если вызов завершился в срок; {@code false}, если истек таймаут /
+     * {@code true} if the call completed in time; {@code false} on timeout
      */
     public boolean await(final PendingCall call, final long timeoutNs) {
         // Phase 1: spin.
