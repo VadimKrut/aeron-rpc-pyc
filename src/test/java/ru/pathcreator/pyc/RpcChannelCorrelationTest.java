@@ -5,6 +5,7 @@ import org.agrona.MutableDirectBuffer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import ru.pathcreator.pyc.codec.MessageCodec;
+import ru.pathcreator.pyc.envelope.Envelope;
 
 import java.nio.ByteOrder;
 import java.nio.file.Files;
@@ -22,6 +23,7 @@ class RpcChannelCorrelationTest {
     private static final int REQUEST_TYPE = 1;
     private static final int RESPONSE_TYPE = 2;
     private static final IntCodec INT_CODEC = new IntCodec();
+    private static final ByteArrayCodec BYTE_ARRAY_CODEC = new ByteArrayCodec();
 
     @Test
     @Timeout(value = 20, unit = TimeUnit.SECONDS)
@@ -179,6 +181,65 @@ class RpcChannelCorrelationTest {
         }
     }
 
+    @Test
+    @Timeout(value = 60, unit = TimeUnit.SECONDS)
+    void maxSupportedPayloadRoundTripsWithoutCorruption() throws Exception {
+        final Path aeronDir = Files.createTempDirectory("aeron-rpc-max-payload-");
+        try (RpcNode node = RpcNode.start(NodeConfig.builder()
+                .aeronDir(aeronDir.toString())
+                .embeddedDriver(true)
+                .build())) {
+
+            final int basePort = 35_000 + ThreadLocalRandom.current().nextInt(10_000);
+            final int streamId = 2_001 + ThreadLocalRandom.current().nextInt(1_000);
+            final int payloadSize = ChannelConfig.DEFAULT_MAX_MESSAGE_SIZE - Envelope.LENGTH;
+            final byte[] payload = new byte[payloadSize];
+            ThreadLocalRandom.current().nextBytes(payload);
+            final int termLength = 128 * 1024 * 1024;
+
+            final RpcChannel client = node.channel(ChannelConfig.builder()
+                    .localEndpoint("localhost:" + basePort)
+                    .remoteEndpoint("localhost:" + (basePort + 1))
+                    .streamId(streamId)
+                    .termLength(termLength)
+                    .defaultTimeout(Duration.ofSeconds(30))
+                    .offerTimeout(Duration.ofSeconds(30))
+                    .heartbeatInterval(Duration.ofMillis(50))
+                    .heartbeatMissedLimit(10)
+                    .offloadExecutor(ChannelConfig.DIRECT_EXECUTOR)
+                    .reconnectStrategy(ReconnectStrategy.FAIL_FAST)
+                    .build());
+            final RpcChannel server = node.channel(ChannelConfig.builder()
+                    .localEndpoint("localhost:" + (basePort + 1))
+                    .remoteEndpoint("localhost:" + basePort)
+                    .streamId(streamId)
+                    .termLength(termLength)
+                    .defaultTimeout(Duration.ofSeconds(30))
+                    .offerTimeout(Duration.ofSeconds(30))
+                    .heartbeatInterval(Duration.ofMillis(50))
+                    .heartbeatMissedLimit(10)
+                    .offloadExecutor(ChannelConfig.DIRECT_EXECUTOR)
+                    .reconnectStrategy(ReconnectStrategy.FAIL_FAST)
+                    .build());
+
+            server.onRequest(REQUEST_TYPE, RESPONSE_TYPE, BYTE_ARRAY_CODEC, BYTE_ARRAY_CODEC, request -> request);
+            server.start();
+            client.start();
+            waitConnected(client, server);
+
+            final byte[] response = client.call(
+                    REQUEST_TYPE,
+                    RESPONSE_TYPE,
+                    payload,
+                    BYTE_ARRAY_CODEC,
+                    BYTE_ARRAY_CODEC,
+                    30,
+                    TimeUnit.SECONDS);
+            assertEquals(payload.length, response.length);
+            assertEquals(-1, java.util.Arrays.mismatch(payload, response));
+        }
+    }
+
     private static Callable<Void> caller(
             final RpcChannel client,
             final CountDownLatch start,
@@ -327,6 +388,21 @@ class RpcChannelCorrelationTest {
         public Integer decode(final DirectBuffer buffer, final int offset, final int length) {
             assertEquals(Integer.BYTES, length);
             return buffer.getInt(offset, ByteOrder.LITTLE_ENDIAN);
+        }
+    }
+
+    private static final class ByteArrayCodec implements MessageCodec<byte[]> {
+        @Override
+        public int encode(final byte[] message, final MutableDirectBuffer buffer, final int offset) {
+            buffer.putBytes(offset, message);
+            return message.length;
+        }
+
+        @Override
+        public byte[] decode(final DirectBuffer buffer, final int offset, final int length) {
+            final byte[] bytes = new byte[length];
+            buffer.getBytes(offset, bytes);
+            return bytes;
         }
     }
 }

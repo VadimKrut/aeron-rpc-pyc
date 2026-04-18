@@ -482,8 +482,14 @@ public final class RpcChannel implements AutoCloseable {
         pendingRegistry.register(correlationId, call);
         try {
             // 1. Encode в staging.
-            final UnsafeBuffer staging = txStaging.get();
-            final int payloadLen = reqCodec.encode(request, staging, Envelope.LENGTH);
+            UnsafeBuffer staging = txStaging.get();
+            int payloadLen;
+            try {
+                payloadLen = reqCodec.encode(request, staging, Envelope.LENGTH);
+            } catch (final IndexOutOfBoundsException ex) {
+                staging = ensureMaxSizedTxStaging();
+                payloadLen = reqCodec.encode(request, staging, Envelope.LENGTH);
+            }
             final int totalLen = Envelope.LENGTH + payloadLen;
             if (totalLen > config.maxMessageSize()) {
                 throw new PayloadTooLargeException(totalLen, config.maxMessageSize());
@@ -802,7 +808,7 @@ public final class RpcChannel implements AutoCloseable {
     ) {
         // Serverside TX: staging из ThreadLocal (для handler-а который в
         // rx-треде или в offload-треде — всё равно каждому свой).
-        final UnsafeBuffer staging = txStaging.get();
+        UnsafeBuffer staging = txStaging.get();
         final int responseOffset = Envelope.LENGTH;
         final int responseCapacity = staging.capacity() - responseOffset;
         final int written = entry.handler.handle(buffer, payloadOffset, payloadLen, staging, responseOffset, responseCapacity);
@@ -824,8 +830,14 @@ public final class RpcChannel implements AutoCloseable {
         final Object req = entry.reqCodec.decode(buffer, payloadOffset, payloadLen);
         final Object resp = entry.handler.handle(req);
         if (resp == null) return;
-        final UnsafeBuffer staging = txStaging.get();
-        final int respLen = entry.respCodec.encode(resp, staging, Envelope.LENGTH);
+        UnsafeBuffer staging = txStaging.get();
+        int respLen;
+        try {
+            respLen = entry.respCodec.encode(resp, staging, Envelope.LENGTH);
+        } catch (final IndexOutOfBoundsException ex) {
+            staging = ensureMaxSizedTxStaging();
+            respLen = entry.respCodec.encode(resp, staging, Envelope.LENGTH);
+        }
         final int totalLen = Envelope.LENGTH + respLen;
         if (totalLen > config.maxMessageSize()) {
             throw new PayloadTooLargeException(totalLen, config.maxMessageSize());
@@ -874,6 +886,16 @@ public final class RpcChannel implements AutoCloseable {
     private UnsafeBuffer acquireCopy() {
         final UnsafeBuffer b = offloadCopyPool.poll();
         return b != null ? b : new UnsafeBuffer(ByteBuffer.allocateDirect(offloadCopyBufferSize));
+    }
+
+    private UnsafeBuffer ensureMaxSizedTxStaging() {
+        UnsafeBuffer staging = txStaging.get();
+        if (staging.capacity() >= config.maxMessageSize()) {
+            return staging;
+        }
+        staging = new UnsafeBuffer(ByteBuffer.allocateDirect(config.maxMessageSize()));
+        txStaging.set(staging);
+        return staging;
     }
 
     private void releaseCopy(final UnsafeBuffer b) {
