@@ -46,7 +46,7 @@ Many low-latency transports push users into async/reactive code even when the bu
     <dependency>
         <groupId>ru.pathcreator.pyc</groupId>
         <artifactId>aeron-rpc</artifactId>
-        <version>0.0.5</version>
+        <version>0.0.6</version>
     </dependency>
 </dependencies>
 ```
@@ -70,7 +70,7 @@ GitHub Packages requires authentication even for reads. Add a token with `read:p
     <dependency>
         <groupId>ru.pathcreator.pyc</groupId>
         <artifactId>aeron-rpc</artifactId>
-        <version>0.0.5</version>
+        <version>0.0.6</version>
     </dependency>
 </dependencies>
 ```

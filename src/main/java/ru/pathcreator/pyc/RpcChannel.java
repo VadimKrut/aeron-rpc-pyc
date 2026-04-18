@@ -799,6 +799,20 @@ public final class RpcChannel implements AutoCloseable {
         }
     }
 
+    /**
+     * Invokes a raw request handler and publishes its response.
+     *
+     * <p>The raw handler writes response bytes directly into the channel's
+     * thread-local staging buffer. This keeps the raw path allocation-free on
+     * the hot path, while still preserving per-thread buffer isolation for
+     * both dedicated RX threads and offloaded handler threads.</p>
+     *
+     * @param entry         handler entry with raw request logic
+     * @param correlationId transport correlation id of the request
+     * @param buffer        source buffer containing the request payload
+     * @param payloadOffset payload start offset inside {@code buffer}
+     * @param payloadLen    payload length in bytes
+     */
     private void invokeRaw(
             final RawEntry entry,
             final long correlationId,
@@ -820,6 +834,20 @@ public final class RpcChannel implements AutoCloseable {
         publishBytes(staging, 0, Envelope.LENGTH + written, BackpressurePolicy.BLOCK);
     }
 
+    /**
+     * Invokes a high-level typed handler and publishes its encoded response.
+     *
+     * <p>If the current thread-local staging buffer is too small for the
+     * encoded response, the buffer is expanded lazily up to
+     * {@link ChannelConfig#maxMessageSize()} for this thread and the encode is
+     * retried.</p>
+     *
+     * @param entry         typed handler entry
+     * @param correlationId transport correlation id of the request
+     * @param buffer        source buffer containing the request payload
+     * @param payloadOffset payload start offset inside {@code buffer}
+     * @param payloadLen    payload length in bytes
+     */
     private void invokeHighLevel(
             final HighLevelEntry entry,
             final long correlationId,
@@ -846,6 +874,18 @@ public final class RpcChannel implements AutoCloseable {
         publishBytes(staging, 0, totalLen, BackpressurePolicy.BLOCK);
     }
 
+    /**
+     * Completes a pending synchronous call when a matching response arrives.
+     *
+     * <p>If the correlation id is unknown, the response is ignored. This can
+     * happen for late packets that arrive after a timeout or after the pending
+     * entry has already been completed and removed.</p>
+     *
+     * @param correlationId response correlation id
+     * @param buffer        source buffer containing the response payload
+     * @param payloadOffset payload start offset inside {@code buffer}
+     * @param payloadLen    payload length in bytes
+     */
     private void handleResponse(
             final long correlationId,
             final DirectBuffer buffer,
@@ -860,6 +900,16 @@ public final class RpcChannel implements AutoCloseable {
     // ================================================================
     //                          heartbeat + copy pool
     // ================================================================
+
+    /**
+     * Emits one heartbeat frame for this channel.
+     *
+     * <p>Heartbeat publication is intentionally {@link BackpressurePolicy#FAIL_FAST}:
+     * if the publication is temporarily busy, the current heartbeat tick is
+     * skipped and a later tick will refresh liveness.</p>
+     *
+     * @param nowNanos current time supplied by the heartbeat manager
+     */
     private void emitHeartbeat(final long nowNanos) {
         final UnsafeBuffer staging = txStaging.get();
         EnvelopeCodec.encode(staging, 0, Envelope.RESERVED_HEARTBEAT, 0L, Envelope.FLAG_IS_HEARTBEAT, 0);
@@ -871,6 +921,9 @@ public final class RpcChannel implements AutoCloseable {
         }
     }
 
+    /**
+     * Fails all currently pending calls after heartbeat-based liveness loss.
+     */
     private void onChannelDown() {
         LOGGER.warning("RPC channel DOWN -> failfast " + pendingRegistry.size() + " pending");
         pendingRegistry.forEachAndClear(pc -> {
@@ -879,15 +932,37 @@ public final class RpcChannel implements AutoCloseable {
         });
     }
 
+    /**
+     * Called when the heartbeat manager observes that the channel is alive
+     * again.
+     */
     private void onChannelUp() {
         LOGGER.info("RPC channel UP");
     }
 
+    /**
+     * Acquires a buffer used to copy request payload bytes for offloaded
+     * handler execution.
+     *
+     * <p>If the pool is empty, a new direct buffer is allocated.</p>
+     *
+     * @return pooled or newly allocated copy buffer
+     */
     private UnsafeBuffer acquireCopy() {
         final UnsafeBuffer b = offloadCopyPool.poll();
         return b != null ? b : new UnsafeBuffer(ByteBuffer.allocateDirect(offloadCopyBufferSize));
     }
 
+    /**
+     * Ensures that the current thread has a staging buffer large enough for
+     * the configured channel maximum message size.
+     *
+     * <p>This is the slow path for large messages. Small-message callers keep
+     * using the original compact thread-local staging buffer.</p>
+     *
+     * @return thread-local staging buffer with capacity at least
+     * {@link ChannelConfig#maxMessageSize()}
+     */
     private UnsafeBuffer ensureMaxSizedTxStaging() {
         UnsafeBuffer staging = txStaging.get();
         if (staging.capacity() >= config.maxMessageSize()) {
@@ -898,15 +973,28 @@ public final class RpcChannel implements AutoCloseable {
         return staging;
     }
 
+    /**
+     * Returns an offload copy buffer back to the pool.
+     *
+     * @param b buffer to release
+     */
     private void releaseCopy(final UnsafeBuffer b) {
         offloadCopyPool.offer(b);
     }
 
+    /**
+     * Validates that the message type id is in the user-reserved range.
+     *
+     * @param id message type id to validate
+     */
     private void validateUserMessageTypeId(final int id) {
         if (id < MIN_USER_MESSAGE_TYPE_ID)
             throw new IllegalArgumentException("messageTypeId must be >= " + MIN_USER_MESSAGE_TYPE_ID + " (got " + id + ")");
     }
 
+    /**
+     * Ensures handler registration happens only before the channel is started.
+     */
     private void ensureNotStarted() {
         if (running.get()) throw new IllegalStateException("register handlers before start()");
     }

@@ -6,7 +6,7 @@
 
     <groupId>ru.pathcreator.pyc</groupId>
     <artifactId>aeron-rpc</artifactId>
-    <version>0.0.5</version>
+    <version>0.0.6</version>
     <packaging>jar</packaging>
 
     <name>aeron-rpc</name>
