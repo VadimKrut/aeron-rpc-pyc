@@ -83,6 +83,7 @@ public final class RpcChannel implements AutoCloseable {
     private static final Logger LOGGER = Logger.getLogger(RpcChannel.class.getName());
 
     private static final int MIN_USER_MESSAGE_TYPE_ID = 1;
+    private static final int ERROR_STATUS_CODE_SIZE = Integer.BYTES;
 
     // ---- handler entry types ----
     private static abstract class HandlerEntry {
@@ -478,7 +479,7 @@ public final class RpcChannel implements AutoCloseable {
         }
         final PendingCall call = pendingPool.acquire();
         final long correlationId = correlations.next();
-        call.prepare(Thread.currentThread(), correlationId);
+        call.prepare(Thread.currentThread(), correlationId, expectedResponseTypeId);
         pendingRegistry.register(correlationId, call);
         try {
             // 1. Encode в staging.
@@ -505,7 +506,7 @@ public final class RpcChannel implements AutoCloseable {
             // 3. Await reply.
             final boolean ok = waiter.await(call, timeoutNs);
             if (!ok) throw new RpcTimeoutException(correlationId, timeoutNs);
-            if (call.isFailed()) throw new RpcException("RPC failed: " + call.failureReason());
+            if (call.isFailed()) throw call.failure();
             return respCodec.decode(call.responseBuffer(), 0, call.responseLength());
         } finally {
             if (!call.isCompleted()) {
@@ -731,7 +732,7 @@ public final class RpcChannel implements AutoCloseable {
                 if (EnvelopeCodec.isRequest(flags)) {
                     handleRequest(msgTypeId, correlationId, buffer, payloadOffset, payloadLen);
                 } else {
-                    handleResponse(correlationId, buffer, payloadOffset, payloadLen);
+                    handleResponse(msgTypeId, correlationId, flags, buffer, payloadOffset, payloadLen);
                 }
             }
             cursor += totalLen;
@@ -796,6 +797,7 @@ public final class RpcChannel implements AutoCloseable {
             else invokeHighLevel((HighLevelEntry) entry, correlationId, buffer, payloadOffset, payloadLen);
         } catch (final Throwable t) {
             LOGGER.log(Level.WARNING, "RPC handler failed", t);
+            tryPublishError(entry, correlationId, t);
         }
     }
 
@@ -887,13 +889,24 @@ public final class RpcChannel implements AutoCloseable {
      * @param payloadLen    payload length in bytes
      */
     private void handleResponse(
+            final int messageTypeId,
             final long correlationId,
+            final int flags,
             final DirectBuffer buffer,
             final int payloadOffset,
             final int payloadLen
     ) {
         final PendingCall call = pendingRegistry.remove(correlationId);
         if (call == null) return;
+        if (messageTypeId != call.expectedResponseTypeId()) {
+            call.completeFail(new RpcException(
+                    "Unexpected response messageTypeId: expected " + call.expectedResponseTypeId() + ", got " + messageTypeId));
+            return;
+        }
+        if (EnvelopeCodec.isError(flags)) {
+            call.completeFail(decodeRemoteError(buffer, payloadOffset, payloadLen));
+            return;
+        }
         call.completeOk(buffer, payloadOffset, payloadLen);
     }
 
@@ -980,6 +993,66 @@ public final class RpcChannel implements AutoCloseable {
      */
     private void releaseCopy(final UnsafeBuffer b) {
         offloadCopyPool.offer(b);
+    }
+
+    private void tryPublishError(final HandlerEntry entry, final long correlationId, final Throwable failure) {
+        final RpcException error = mapRemoteError(failure);
+        try {
+            final UnsafeBuffer staging = txStaging.get();
+            final int payloadLen = encodeRemoteError(staging, Envelope.LENGTH, error);
+            final int responseMessageTypeId = responseMessageTypeId(entry);
+            EnvelopeCodec.encode(staging, 0, responseMessageTypeId, correlationId, Envelope.FLAG_IS_ERROR, payloadLen);
+            publishBytes(staging, 0, Envelope.LENGTH + payloadLen, BackpressurePolicy.BLOCK);
+        } catch (final Throwable publishFailure) {
+            LOGGER.log(Level.WARNING, "RPC error response publish failed", publishFailure);
+        }
+    }
+
+    private static int responseMessageTypeId(final HandlerEntry entry) {
+        if (entry instanceof RawEntry raw) {
+            return raw.responseMessageTypeId;
+        }
+        return ((HighLevelEntry) entry).responseMessageTypeId;
+    }
+
+    private static RpcException mapRemoteError(final Throwable failure) {
+        if (failure instanceof RpcApplicationException applicationException) {
+            return applicationException;
+        }
+        if (failure instanceof PayloadTooLargeException payloadTooLargeException) {
+            return new RpcApplicationException(RpcStatus.PAYLOAD_TOO_LARGE, payloadTooLargeException.getMessage(), payloadTooLargeException);
+        }
+        if (failure instanceof IllegalArgumentException illegalArgumentException) {
+            return new RpcApplicationException(RpcStatus.BAD_REQUEST, illegalArgumentException.getMessage(), illegalArgumentException);
+        }
+        if (failure instanceof UnsupportedOperationException unsupportedOperationException) {
+            return new RpcApplicationException(RpcStatus.NOT_IMPLEMENTED, unsupportedOperationException.getMessage(), unsupportedOperationException);
+        }
+        return new RpcApplicationException(RpcStatus.INTERNAL_SERVER_ERROR, failure.toString(), failure);
+    }
+
+    private static int encodeRemoteError(final MutableDirectBuffer buffer, final int offset, final RpcException error) {
+        final int statusCode = error instanceof RpcApplicationException applicationException
+                ? applicationException.statusCode()
+                : RpcStatus.INTERNAL_SERVER_ERROR.code();
+        final byte[] bytes = error.getMessage().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        buffer.putInt(offset, statusCode, java.nio.ByteOrder.LITTLE_ENDIAN);
+        buffer.putBytes(offset + ERROR_STATUS_CODE_SIZE, bytes);
+        return ERROR_STATUS_CODE_SIZE + bytes.length;
+    }
+
+    private static RemoteRpcException decodeRemoteError(final DirectBuffer buffer, final int offset, final int length) {
+        if (length < ERROR_STATUS_CODE_SIZE) {
+            return new RemoteRpcException(RpcStatus.INTERNAL_SERVER_ERROR.code(), "Remote RPC failed without valid error payload");
+        }
+        final int statusCode = buffer.getInt(offset, java.nio.ByteOrder.LITTLE_ENDIAN);
+        final int messageLength = length - ERROR_STATUS_CODE_SIZE;
+        final byte[] bytes = new byte[Math.max(0, messageLength)];
+        if (messageLength > 0) {
+            buffer.getBytes(offset + ERROR_STATUS_CODE_SIZE, bytes);
+        }
+        final String message = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+        return new RemoteRpcException(statusCode, message.isEmpty() ? "remote error" : message);
     }
 
     /**

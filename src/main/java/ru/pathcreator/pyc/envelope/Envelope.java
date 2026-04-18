@@ -23,7 +23,8 @@ package ru.pathcreator.pyc.envelope;
  * 2        2      version         версия формата / envelope format version
  * 4        4      messageTypeId   тип сообщения для маршрутизации / message type used for routing
  * 8        8      correlationId   идентификатор корреляции / transport-level correlation id
- * 16       4      flags           бит 0: request, бит 1: heartbeat / bit 0: request, bit 1: heartbeat
+ * 16       4      flags           бит 0: request, бит 1: heartbeat, бит 2: error /
+ *                                 bit 0: request, bit 1: heartbeat, bit 2: error
  * 20       4      payloadLength   размер payload после envelope / payload size after the envelope, in bytes
  * }</pre>
  *
@@ -120,6 +121,15 @@ public final class Envelope {
      * <p>Flag bit that marks an envelope as a heartbeat frame.</p>
      */
     public static final int FLAG_IS_HEARTBEAT = 1 << 1;
+
+    /**
+     * Bit flag that marks an envelope as a structured remote error response.
+     *
+     * <p>Error frames still use the normal response message type id and
+     * correlation id, but their payload is interpreted as a transport error
+     * body instead of a user response payload.</p>
+     */
+    public static final int FLAG_IS_ERROR = 1 << 2;
 
     /**
      * Зарезервированный идентификатор типа сообщения для heartbeat-кадров.

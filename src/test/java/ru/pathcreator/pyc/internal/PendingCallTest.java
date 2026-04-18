@@ -13,12 +13,13 @@ class PendingCallTest {
     void prepareInitializesPendingState() {
         final PendingCall call = new PendingCall();
 
-        call.prepare(Thread.currentThread(), 77L);
+        call.prepare(Thread.currentThread(), 77L, 88);
 
         assertFalse(call.isCompleted());
         assertFalse(call.isFailed());
         assertNull(call.failureReason());
         assertEquals(77L, call.correlationId());
+        assertEquals(88, call.expectedResponseTypeId());
         assertEquals(0, call.responseLength());
     }
 
@@ -65,6 +66,7 @@ class PendingCallTest {
         assertFalse(call.isFailed());
         assertNull(call.failureReason());
         assertEquals(0L, call.correlationId());
+        assertEquals(0, call.expectedResponseTypeId());
         assertEquals(0, call.responseLength());
     }
 }

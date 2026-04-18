@@ -11,7 +11,8 @@ The library keeps a blocking `call()` API while the transport path is tuned for:
 
 ## Why
 
-Many low-latency transports push users into async/reactive code even when the business flow is naturally request/response.
+Many low-latency transports push users into async/reactive code even when the business flow is naturally
+request/response.
 
 `aeron-rpc` is for the opposite case:
 
@@ -35,6 +36,7 @@ Many low-latency transports push users into async/reactive code even when the bu
 ### Maven via GitVerse
 
 ```xml
+
 <repositories>
     <repository>
         <id>gitverse</id>
@@ -43,19 +45,21 @@ Many low-latency transports push users into async/reactive code even when the bu
 </repositories>
 
 <dependencies>
-    <dependency>
-        <groupId>ru.pathcreator.pyc</groupId>
-        <artifactId>aeron-rpc</artifactId>
-        <version>0.0.6</version>
-    </dependency>
+<dependency>
+    <groupId>ru.pathcreator.pyc</groupId>
+    <artifactId>aeron-rpc</artifactId>
+    <version>0.0.7</version>
+</dependency>
 </dependencies>
 ```
 
 ### Maven via GitHub Packages
 
-GitHub Packages requires authentication even for reads. Add a token with `read:packages` to Maven `settings.xml`, then configure:
+GitHub Packages requires authentication even for reads. Add a token with `read:packages` to Maven `settings.xml`, then
+configure:
 
 ```xml
+
 <repositories>
     <repository>
         <id>github</id>
@@ -67,11 +71,11 @@ GitHub Packages requires authentication even for reads. Add a token with `read:p
 </repositories>
 
 <dependencies>
-    <dependency>
-        <groupId>ru.pathcreator.pyc</groupId>
-        <artifactId>aeron-rpc</artifactId>
-        <version>0.0.6</version>
-    </dependency>
+<dependency>
+    <groupId>ru.pathcreator.pyc</groupId>
+    <artifactId>aeron-rpc</artifactId>
+    <version>0.0.7</version>
+</dependency>
 </dependencies>
 ```
 
@@ -109,11 +113,16 @@ RpcChannel channel = node.channel(
 ```java
 channel.onRequest(
         1,
-        2,
-        new MyRequestCodec(),
-        new MyResponseCodec(),
-        req -> new MyResponse(req.id())
-);
+                2,
+                new MyRequestCodec(),
+        new
+
+MyResponseCodec(),
+
+req ->new
+
+MyResponse(req.id())
+        );
 ```
 
 ### Start and call
@@ -156,7 +165,8 @@ reconnect handling, many-channel layouts, and a complete settings reference, see
 - its own correlation flow
 - its own handler registry
 
-Multiple caller threads are safe. Responses are matched by correlation id, so one caller cannot receive another caller's response.
+Multiple caller threads are safe. Responses are matched by correlation id, so one caller cannot receive another caller's
+response.
 
 ### `MessageCodec`
 
@@ -165,6 +175,7 @@ Multiple caller threads are safe. Responses are matched by correlation id, so on
 ```java
 interface MessageCodec<T> {
     int encode(T message, MutableDirectBuffer buffer, int offset);
+
     T decode(DirectBuffer buffer, int offset, int length);
 }
 ```
@@ -175,11 +186,28 @@ interface MessageCodec<T> {
 
 Use it when you want tight control over allocations and serialization.
 
+### Remote errors
+
+Unhandled server-side failures are returned as structured remote errors instead
+of silently turning into client-side timeouts.
+
+The transport uses HTTP-like status codes for built-in failures:
+
+- `400` bad request
+- `413` payload too large
+- `500` internal server error
+- `501` not implemented
+- `503` service unavailable
+
+Application handlers can return their own business error codes by throwing
+`RpcApplicationException`, preferably with custom codes `>= 1000`.
+
 ## Current Transport Architecture
 
 Recent changes introduced a shared receive-poller design.
 
-Instead of forcing one hot RX thread per channel, `RpcNode` can host a shared receive poller with multiple lanes. Each `RpcChannel` stays logically isolated, but receive polling can be shared across many channels on the same driver.
+Instead of forcing one hot RX thread per channel, `RpcNode` can host a shared receive poller with multiple lanes. Each
+`RpcChannel` stays logically isolated, but receive polling can be shared across many channels on the same driver.
 
 Important properties:
 
@@ -194,21 +222,21 @@ This matters especially for workloads with many channels on one `MediaDriver`.
 
 ### Handler execution
 
-| Setting | Runs where | Use when |
-|---|---|---|
-| default | node default executor | normal blocking or I/O-heavy handlers |
-| `.offloadExecutor(myPool)` | your executor | custom scheduling / CPU-heavy work |
-| `.offloadExecutor(ChannelConfig.DIRECT_EXECUTOR)` | directly in receive path | only for extremely fast handlers |
+| Setting                                           | Runs where               | Use when                              |
+|---------------------------------------------------|--------------------------|---------------------------------------|
+| default                                           | node default executor    | normal blocking or I/O-heavy handlers |
+| `.offloadExecutor(myPool)`                        | your executor            | custom scheduling / CPU-heavy work    |
+| `.offloadExecutor(ChannelConfig.DIRECT_EXECUTOR)` | directly in receive path | only for extremely fast handlers      |
 
 `DIRECT_EXECUTOR` removes offload scheduling and payload copy, but a slow handler blocks receive progress.
 
 ### RX idle strategy
 
-| Strategy | Use when |
-|---|---|
-| `YIELDING` | low-latency default |
+| Strategy    | Use when                                        |
+|-------------|-------------------------------------------------|
+| `YIELDING`  | low-latency default                             |
 | `BUSY_SPIN` | you are willing to burn a core for the hot path |
-| `BACKOFF` | mostly idle channels and CPU-sensitive hosts |
+| `BACKOFF`   | mostly idle channels and CPU-sensitive hosts    |
 
 ### Reconnect strategy
 
@@ -217,17 +245,28 @@ This matters especially for workloads with many channels on one `MediaDriver`.
 - `ReconnectStrategy.FAIL_FAST` - old behavior, fail immediately if disconnected
 - `ReconnectStrategy.WAIT_FOR_CONNECTION` - wait until the existing publication/heartbeat becomes connected again
 
-This does not recreate channels automatically. It only waits for the current Aeron path to come back before sending the request.
+This does not recreate channels automatically. It only waits for the current Aeron path to come back before sending the
+request.
 
 Example:
 
 ```java
 ChannelConfig.builder()
-        .localEndpoint("localhost:40101")
-        .remoteEndpoint("localhost:40102")
-        .streamId(1001)
-        .reconnectStrategy(ReconnectStrategy.WAIT_FOR_CONNECTION)
-        .build();
+        .
+
+localEndpoint("localhost:40101")
+        .
+
+remoteEndpoint("localhost:40102")
+        .
+
+streamId(1001)
+        .
+
+reconnectStrategy(ReconnectStrategy.WAIT_FOR_CONNECTION)
+        .
+
+build();
 ```
 
 ### Shared receive poller
@@ -289,7 +328,10 @@ That document contains:
 ## Limitations
 
 - no automatic channel recreation
-- default max payload is 16 MiB
+- regular `RpcChannel` supports a single message up to 16 MiB total size
+- the usable payload is slightly smaller than 16 MiB because protocol envelope bytes are included in that limit
+- payloads or files larger than a single 16 MiB message should use application-level chunking or a separate transport
+  path
 - `DIRECT_EXECUTOR` can block receive progress
 - auth, encryption, and authorization belong to the application or infrastructure layer
 

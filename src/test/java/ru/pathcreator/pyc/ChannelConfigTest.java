@@ -80,10 +80,12 @@ class ChannelConfigTest {
 
     @Test
     void rejectsTooLargeMessageSize() {
-        assertThrows(IllegalArgumentException.class, () -> ChannelConfig.builder()
+        final IllegalArgumentException exception = assertThrows(IllegalArgumentException.class, () -> ChannelConfig.builder()
                 .localEndpoint("localhost:40101")
                 .remoteEndpoint("localhost:40102")
                 .maxMessageSize(ChannelConfig.DEFAULT_MAX_MESSAGE_SIZE + 1)
                 .build());
+
+        assertEquals("maxMessageSize > 16 MiB not supported by RpcChannel.", exception.getMessage());
     }
 }

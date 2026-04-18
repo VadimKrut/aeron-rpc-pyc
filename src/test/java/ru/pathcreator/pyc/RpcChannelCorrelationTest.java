@@ -6,6 +6,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import ru.pathcreator.pyc.codec.MessageCodec;
 import ru.pathcreator.pyc.envelope.Envelope;
+import ru.pathcreator.pyc.exceptions.RemoteRpcException;
+import ru.pathcreator.pyc.exceptions.RpcApplicationException;
+import ru.pathcreator.pyc.exceptions.RpcStatus;
 
 import java.nio.ByteOrder;
 import java.nio.file.Files;
@@ -17,6 +20,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.locks.LockSupport;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 
 class RpcChannelCorrelationTest {
 
@@ -237,6 +241,75 @@ class RpcChannelCorrelationTest {
                     TimeUnit.SECONDS);
             assertEquals(payload.length, response.length);
             assertEquals(-1, java.util.Arrays.mismatch(payload, response));
+        }
+    }
+
+    @Test
+    @Timeout(value = 20, unit = TimeUnit.SECONDS)
+    void remoteHandlerExceptionReturnsStructuredRemoteError() throws Exception {
+        final Path aeronDir = Files.createTempDirectory("aeron-rpc-remote-error-");
+        try (RpcNode node = RpcNode.start(NodeConfig.builder()
+                .aeronDir(aeronDir.toString())
+                .embeddedDriver(true)
+                .build())) {
+
+            final int basePort = 35_000 + ThreadLocalRandom.current().nextInt(10_000);
+            final int streamId = 2_001 + ThreadLocalRandom.current().nextInt(1_000);
+            final RpcChannel client = node.channel(channelConfig(
+                    "localhost:" + basePort,
+                    "localhost:" + (basePort + 1),
+                    streamId));
+            final RpcChannel server = node.channel(channelConfig(
+                    "localhost:" + (basePort + 1),
+                    "localhost:" + basePort,
+                    streamId));
+
+            server.onRequest(REQUEST_TYPE, RESPONSE_TYPE, INT_CODEC, INT_CODEC, request -> {
+                throw new IllegalStateException("boom");
+            });
+            server.start();
+            client.start();
+            waitConnected(client, server);
+
+            final RemoteRpcException exception = assertInstanceOf(RemoteRpcException.class, org.junit.jupiter.api.Assertions.assertThrows(
+                    RemoteRpcException.class,
+                    () -> client.call(REQUEST_TYPE, RESPONSE_TYPE, 42, INT_CODEC, INT_CODEC, 5, TimeUnit.SECONDS)));
+            assertEquals(RpcStatus.INTERNAL_SERVER_ERROR.code(), exception.statusCode());
+        }
+    }
+
+    @Test
+    @Timeout(value = 20, unit = TimeUnit.SECONDS)
+    void remoteApplicationExceptionPreservesStatusCodeAndMessage() throws Exception {
+        final Path aeronDir = Files.createTempDirectory("aeron-rpc-remote-app-error-");
+        try (RpcNode node = RpcNode.start(NodeConfig.builder()
+                .aeronDir(aeronDir.toString())
+                .embeddedDriver(true)
+                .build())) {
+
+            final int basePort = 35_000 + ThreadLocalRandom.current().nextInt(10_000);
+            final int streamId = 2_001 + ThreadLocalRandom.current().nextInt(1_000);
+            final RpcChannel client = node.channel(channelConfig(
+                    "localhost:" + basePort,
+                    "localhost:" + (basePort + 1),
+                    streamId));
+            final RpcChannel server = node.channel(channelConfig(
+                    "localhost:" + (basePort + 1),
+                    "localhost:" + basePort,
+                    streamId));
+
+            server.onRequest(REQUEST_TYPE, RESPONSE_TYPE, INT_CODEC, INT_CODEC, request -> {
+                throw new RpcApplicationException(1001, "business rule failed");
+            });
+            server.start();
+            client.start();
+            waitConnected(client, server);
+
+            final RemoteRpcException exception = assertInstanceOf(RemoteRpcException.class, org.junit.jupiter.api.Assertions.assertThrows(
+                    RemoteRpcException.class,
+                    () -> client.call(REQUEST_TYPE, RESPONSE_TYPE, 42, INT_CODEC, INT_CODEC, 5, TimeUnit.SECONDS)));
+            assertEquals(1001, exception.statusCode());
+            assertEquals("Remote RPC failed [1001]: business rule failed", exception.getMessage());
         }
     }
 

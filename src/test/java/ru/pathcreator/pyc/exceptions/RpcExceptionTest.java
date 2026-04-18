@@ -2,8 +2,7 @@ package ru.pathcreator.pyc.exceptions;
 
 import org.junit.jupiter.api.Test;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.*;
 
 class RpcExceptionTest {
 
@@ -22,6 +21,54 @@ class RpcExceptionTest {
 
         assertEquals(200, exception.actual());
         assertEquals(100, exception.limit());
+    }
+
+    @Test
+    void applicationExceptionStoresKnownStatusCode() {
+        final RpcApplicationException exception = new RpcApplicationException(RpcStatus.BAD_REQUEST, "bad");
+
+        assertEquals(RpcStatus.BAD_REQUEST.code(), exception.statusCode());
+        assertEquals("bad", exception.getMessage());
+    }
+
+    @Test
+    void applicationExceptionStoresCustomStatusCode() {
+        final RpcApplicationException exception = new RpcApplicationException(1001, "domain");
+
+        assertEquals(1001, exception.statusCode());
+        assertEquals("domain", exception.getMessage());
+    }
+
+    @Test
+    void applicationExceptionRejectsReservedCustomCodes() {
+        final IllegalArgumentException exception = org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalArgumentException.class,
+                () -> new RpcApplicationException(999, "bad"));
+
+        assertEquals("custom application statusCode must be >= 1000", exception.getMessage());
+    }
+
+    @Test
+    void remoteExceptionResolvesKnownStatus() {
+        final RemoteRpcException exception = new RemoteRpcException(413, "too large");
+
+        assertEquals(413, exception.statusCode());
+        assertEquals(RpcStatus.PAYLOAD_TOO_LARGE, exception.status());
+    }
+
+    @Test
+    void resolvesEveryKnownRpcStatusFromNumericCode() {
+        for (final RpcStatus status : RpcStatus.values()) {
+            assertEquals(status, RpcStatus.fromCode(status.code()));
+        }
+    }
+
+    @Test
+    void remoteExceptionLeavesCustomStatusUnresolved() {
+        final RemoteRpcException exception = new RemoteRpcException(1001, "domain");
+
+        assertEquals(1001, exception.statusCode());
+        assertNull(exception.status());
     }
 
     @Test

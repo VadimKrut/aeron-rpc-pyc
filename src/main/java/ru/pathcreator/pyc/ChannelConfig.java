@@ -26,7 +26,8 @@ import java.util.concurrent.ExecutorService;
  *       handler-а — использовать ТОЛЬКО для гарантированно быстрых
  *       handler-ов типа ACK/lookup &lt; 5 µs).</li>
  *   <li><b>Backpressure</b>: BLOCK или FAIL_FAST.</li>
- *   <li><b>maxMessageSize</b>: hard cap 16 MiB.</li>
+ *   <li><b>maxMessageSize</b>: hard cap 16 MiB, validated and supported by the
+ *       regular {@link RpcChannel} path.</li>
  * </ul>
  *
  * <p>Configuration of one RPC channel. It defines Aeron endpoints, stream
@@ -737,7 +738,7 @@ public final class ChannelConfig {
             if (Integer.bitCount(termLength) != 1)
                 throw new IllegalArgumentException("termLength must be power of two");
             if (maxMessageSize > DEFAULT_MAX_MESSAGE_SIZE)
-                throw new IllegalArgumentException("maxMessageSize > 16 MiB not supported by RpcChannel. " + "For larger payloads use LargePayloadRpcChannel.");
+                throw new IllegalArgumentException("maxMessageSize > 16 MiB not supported by RpcChannel.");
             if (maxMessageSize < 128)
                 throw new IllegalArgumentException("maxMessageSize too small");
             if (heartbeatMissedLimit < 1)

@@ -516,15 +516,56 @@ NodeConfig config = NodeConfig.builder()
 
 ## 12. Large Payloads
 
-`LargePayloadRpcChannel` is currently a stub namespace and is not implemented
-yet.
+Regular `RpcChannel` supports a single message up to `16 MiB` total size.
 
 That means:
 
-- normal `RpcChannel` is the supported transport today
-- very large payload streaming is not a finished feature yet
+- the supported max-size path today is the normal `RpcChannel`
+- the usable payload is slightly smaller than `16 MiB` because the protocol envelope is included in that limit
+- payloads or files larger than a single `16 MiB` message should use application-level chunking or a separate transfer path
 
-## 13. Which Profile Should I Start With?
+## 13. Remote Errors
+
+If a server-side handler fails, the caller receives a structured
+`RemoteRpcException` instead of waiting until timeout.
+
+Built-in transport statuses use HTTP-like numeric codes:
+
+- `400` bad request
+- `413` payload too large
+- `500` internal server error
+- `501` not implemented
+- `503` service unavailable
+
+Application handlers can return their own business errors:
+
+```java
+import ru.pathcreator.pyc.exceptions.RpcApplicationException;
+import ru.pathcreator.pyc.exceptions.RpcStatus;
+
+server.onRequest(
+        1,
+        2,
+        OrderRequestCodec.INSTANCE,
+        OrderResponseCodec.INSTANCE,
+        request -> {
+            if (request.quantity() <= 0) {
+                throw new RpcApplicationException(RpcStatus.BAD_REQUEST, "quantity must be positive");
+            }
+            if (request.accountId() == 0) {
+                throw new RpcApplicationException(1001, "account is not allowed to trade");
+            }
+            return handleOrder(request);
+        }
+);
+```
+
+Recommended convention:
+
+- use built-in 4xx/5xx style codes for transport or generic validation failures
+- use custom codes `>= 1000` for service-specific business errors
+
+## 14. Which Profile Should I Start With?
 
 ### Most users
 
@@ -560,7 +601,7 @@ Instead of:
 
 - one heavily contended shared channel for everything
 
-## 14. Validation
+## 15. Validation
 
 After changing settings, validate with both:
 

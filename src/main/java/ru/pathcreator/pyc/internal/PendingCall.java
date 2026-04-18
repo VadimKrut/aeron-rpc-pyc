@@ -2,6 +2,7 @@ package ru.pathcreator.pyc.internal;
 
 import org.agrona.MutableDirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
+import ru.pathcreator.pyc.exceptions.RpcException;
 
 import java.nio.ByteBuffer;
 import java.util.concurrent.locks.LockSupport;
@@ -28,8 +29,10 @@ public final class PendingCall {
     private volatile boolean completed;
     private volatile Thread parkedThread;
     private volatile String failureReason;
+    private volatile RpcException failure;
 
     private long correlationId;
+    private int expectedResponseTypeId;
 
     // Response payload хранится в этом direct buffer.
     // Первая инициализация в constructor на "разумный" размер, растёт только вверх.
@@ -57,11 +60,24 @@ public final class PendingCall {
      * @param correlationId идентификатор корреляции запроса / request correlation identifier
      */
     public void prepare(final Thread caller, final long correlationId) {
+        prepare(caller, correlationId, 0);
+    }
+
+    /**
+     * Prepares the slot before it is registered in the pending call registry.
+     *
+     * @param caller                 caller thread waiting for the response
+     * @param correlationId          request correlation identifier
+     * @param expectedResponseTypeId expected response message type identifier
+     */
+    public void prepare(final Thread caller, final long correlationId, final int expectedResponseTypeId) {
         this.parkedThread = caller;
         this.correlationId = correlationId;
+        this.expectedResponseTypeId = expectedResponseTypeId;
         this.completed = false;
         this.failed = false;
         this.failureReason = null;
+        this.failure = null;
         this.responseLength = 0;
     }
 
@@ -95,7 +111,18 @@ public final class PendingCall {
      * @param reason текстовая причина завершения / failure reason
      */
     public void completeFail(final String reason) {
-        this.failureReason = reason;
+        completeFail(new RpcException(reason));
+    }
+
+    /**
+     * Completes the call with a structured exception and unparks the waiting
+     * thread.
+     *
+     * @param exception failure to propagate to the caller
+     */
+    public void completeFail(final RpcException exception) {
+        this.failure = exception;
+        this.failureReason = exception.getMessage();
         this.failed = true;
         this.completed = true;
         final Thread t = this.parkedThread;
@@ -137,6 +164,15 @@ public final class PendingCall {
     }
 
     /**
+     * Returns the failure exception captured for the call.
+     *
+     * @return failure exception or {@code null} when there is no failure
+     */
+    public RpcException failure() {
+        return failure;
+    }
+
+    /**
      * Возвращает идентификатор корреляции связанного запроса.
      *
      * <p>Returns the correlation identifier of the associated request.</p>
@@ -145,6 +181,15 @@ public final class PendingCall {
      */
     public long correlationId() {
         return correlationId;
+    }
+
+    /**
+     * Returns the expected response message type identifier for this call.
+     *
+     * @return expected response message type identifier
+     */
+    public int expectedResponseTypeId() {
+        return expectedResponseTypeId;
     }
 
     /**
@@ -183,7 +228,9 @@ public final class PendingCall {
         this.completed = false;
         this.failed = false;
         this.failureReason = null;
+        this.failure = null;
         this.correlationId = 0L;
+        this.expectedResponseTypeId = 0;
         this.responseLength = 0;
     }
 

@@ -173,4 +173,14 @@ public final class EnvelopeCodec {
     public static boolean isHeartbeat(final int flags) {
         return (flags & Envelope.FLAG_IS_HEARTBEAT) != 0;
     }
+
+    /**
+     * Checks whether the error flag is set.
+     *
+     * @param flags envelope flags
+     * @return {@code true} when the frame is a structured error response
+     */
+    public static boolean isError(final int flags) {
+        return (flags & Envelope.FLAG_IS_ERROR) != 0;
+    }
 }

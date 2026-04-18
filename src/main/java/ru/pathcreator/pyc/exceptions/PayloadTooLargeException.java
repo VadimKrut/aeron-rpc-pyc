@@ -31,8 +31,7 @@ public final class PayloadTooLargeException extends RpcException {
      * @param limit  максимально допустимый размер payload в байтах / maximum allowed payload size in bytes
      */
     public PayloadTooLargeException(final int actual, final int limit) {
-        super("Payload too large: " + actual + " bytes > limit " + limit +
-              " bytes. For large payloads use LargePayloadRpcChannel (not implemented yet).");
+        super("Payload too large: " + actual + " bytes > limit " + limit + " bytes.");
         this.actual = actual;
         this.limit = limit;
     }
