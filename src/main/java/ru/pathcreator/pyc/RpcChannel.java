@@ -2,7 +2,6 @@ package ru.pathcreator.pyc;
 
 import io.aeron.*;
 import io.aeron.logbuffer.BufferClaim;
-import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.logbuffer.Header;
 import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
@@ -68,6 +67,11 @@ import java.util.logging.Logger;
  * responses by transport correlation identifiers, while server-side handlers
  * can be executed either in offload executor threads or directly in the receive
  * thread when explicitly configured.</p>
+ *
+ * <p>A channel is still the unit of logical isolation: it owns its
+ * publication, subscription, pending-call registry, correlation flow, and
+ * handler registry. Recent changes only affect how receive polling is driven:
+ * either by a dedicated RX thread or by a node-level shared receive poller.</p>
  */
 public final class RpcChannel implements AutoCloseable {
 
@@ -118,6 +122,7 @@ public final class RpcChannel implements AutoCloseable {
     private final ChannelConfig config;
     private final boolean directExecutor;
     private final ExecutorService offloadExecutor;
+    private final SharedReceivePoller receivePoller;
 
     private final Subscription subscription;
     private final ConcurrentPublication publication;
@@ -153,6 +158,7 @@ public final class RpcChannel implements AutoCloseable {
 
     // RX
     private final Thread rxThread;
+    private final FragmentAssembler rxAssembler;
     private final AtomicBoolean running = new AtomicBoolean(false);
 
     // Heartbeat
@@ -176,7 +182,34 @@ public final class RpcChannel implements AutoCloseable {
             final Aeron aeron,
             final ExecutorService nodeDefaultExecutor
     ) {
+        this(config, aeron, nodeDefaultExecutor, null);
+    }
+
+    /**
+     * Internal constructor used by {@link RpcNode}.
+     *
+     * <p>If {@code receivePoller} is {@code null}, the channel creates and owns
+     * its dedicated RX thread. Otherwise the channel registers into the
+     * node-level shared receive poller and does not create its own RX thread.</p>
+     *
+     * <p>Handler execution mode is resolved once here:
+     * {@link ChannelConfig#DIRECT_EXECUTOR} means execute handlers directly in
+     * the RX path; otherwise the channel uses the explicitly configured
+     * executor, or falls back to the node default executor.</p>
+     *
+     * @param config              channel configuration
+     * @param aeron               Aeron client
+     * @param nodeDefaultExecutor node-level fallback executor for offloaded handlers
+     * @param receivePoller       shared receive poller, or {@code null} for dedicated RX thread mode
+     */
+    RpcChannel(
+            final ChannelConfig config,
+            final Aeron aeron,
+            final ExecutorService nodeDefaultExecutor,
+            final SharedReceivePoller receivePoller
+    ) {
         this.config = config;
+        this.receivePoller = receivePoller;
         final boolean direct = config.isDirectExecutor();
         this.directExecutor = direct;
         if (direct) {
@@ -220,9 +253,14 @@ public final class RpcChannel implements AutoCloseable {
             offloadCopyPool.offer(new UnsafeBuffer(ByteBuffer.allocateDirect(offloadCopyBufferSize)));
         }
 
-        // Rx thread
-        this.rxThread = new Thread(this::rxLoop, "rpc-rx-" + config.localEndpoint() + "-s" + config.streamId());
-        this.rxThread.setDaemon(false);
+        // Rx
+        this.rxAssembler = new FragmentAssembler(this::dispatch);
+        if (receivePoller == null) {
+            this.rxThread = new Thread(this::rxLoop, "rpc-rx-" + config.localEndpoint() + "-s" + config.streamId());
+            this.rxThread.setDaemon(false);
+        } else {
+            this.rxThread = null;
+        }
 
         // Heartbeat
         this.heartbeat = new HeartbeatManager(
@@ -301,7 +339,11 @@ public final class RpcChannel implements AutoCloseable {
         if (!running.compareAndSet(false, true)) {
             throw new IllegalStateException("already started");
         }
-        rxThread.start();
+        if (receivePoller == null) {
+            rxThread.start();
+        } else {
+            receivePoller.register(this);
+        }
         heartbeat.start();
     }
 
@@ -313,11 +355,16 @@ public final class RpcChannel implements AutoCloseable {
     @Override
     public void close() {
         running.set(false);
+        if (receivePoller != null) {
+            receivePoller.unregister(this);
+        }
         heartbeat.close();
-        try {
-            rxThread.join(2000);
-        } catch (final InterruptedException ie) {
-            Thread.currentThread().interrupt();
+        if (rxThread != null) {
+            try {
+                rxThread.join(2000);
+            } catch (final InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            }
         }
         pendingRegistry.forEachAndClear(pc -> {
             pc.completeFail("channel closed");
@@ -426,7 +473,7 @@ public final class RpcChannel implements AutoCloseable {
     ) {
         validateUserMessageTypeId(requestMessageTypeId);
         validateUserMessageTypeId(expectedResponseTypeId);
-        if (!isConnected()) {
+        if (!awaitConnected(timeoutNs)) {
             throw new NotConnectedException("channel not connected: " + config.remoteEndpoint());
         }
         final PendingCall call = pendingPool.acquire();
@@ -517,6 +564,11 @@ public final class RpcChannel implements AutoCloseable {
             final IdleStrategy idle
     ) {
         if (result == Publication.NOT_CONNECTED) {
+            if (config.reconnectStrategy() == ReconnectStrategy.WAIT_FOR_CONNECTION
+                && System.nanoTime() < deadline
+                && waitPublicationConnected(deadline, idle)) {
+                return;
+            }
             throw new NotConnectedException("publication not connected");
         }
         if (result == Publication.CLOSED) {
@@ -546,13 +598,40 @@ public final class RpcChannel implements AutoCloseable {
     //                               RX
     // ================================================================
     private void rxLoop() {
-        final FragmentHandler dispatcher = this::dispatch;
-        final FragmentAssembler assembler = new FragmentAssembler(dispatcher);
         final IdleStrategy idle = createIdleStrategy(config.rxIdleStrategy());
         while (running.get()) {
-            final int fragments = subscription.poll(assembler, 16);
+            final int fragments = pollRx(16);
             idle.idle(fragments);
         }
+    }
+
+    /**
+     * Polls the channel subscription once.
+     *
+     * <p>This method is intentionally package-private so a node-level
+     * {@link SharedReceivePoller} can drive many channels without exposing the
+     * polling API publicly.</p>
+     *
+     * @param fragmentLimit fragment limit for this poll pass
+     * @return number of fragments processed
+     */
+    int pollRx(final int fragmentLimit) {
+        if (!running.get()) {
+            return 0;
+        }
+        return subscription.poll(rxAssembler, fragmentLimit);
+    }
+
+    /**
+     * Returns the receive idle strategy configured for this channel.
+     *
+     * <p>Used by the shared receive poller to assign the channel to a poller
+     * lane group with matching idle behavior.</p>
+     *
+     * @return configured receive idle strategy kind
+     */
+    IdleStrategyKind rxIdleStrategyKind() {
+        return config.rxIdleStrategy();
     }
 
     private static IdleStrategy createIdleStrategy(final IdleStrategyKind kind) {
@@ -564,6 +643,59 @@ public final class RpcChannel implements AutoCloseable {
                     TimeUnit.MILLISECONDS.toNanos(1));
             default -> new YieldingIdleStrategy();
         };
+    }
+
+    /**
+     * Waits for the channel to become connected according to both the Aeron
+     * publication and the heartbeat state.
+     *
+     * <p>With {@link ReconnectStrategy#FAIL_FAST} this returns immediately when
+     * the channel is disconnected. With
+     * {@link ReconnectStrategy#WAIT_FOR_CONNECTION} it spins/yields until the
+     * channel reconnects or the timeout expires.</p>
+     *
+     * @param timeoutNs maximum time to wait in nanoseconds
+     * @return {@code true} if the channel becomes connected in time
+     */
+    private boolean awaitConnected(final long timeoutNs) {
+        if (isConnected()) {
+            return true;
+        }
+        if (config.reconnectStrategy() == ReconnectStrategy.FAIL_FAST) {
+            return false;
+        }
+        final long deadline = System.nanoTime() + timeoutNs;
+        final IdleStrategy idle = txIdleTl.get();
+        idle.reset();
+        while (running.get() && System.nanoTime() < deadline) {
+            if (isConnected()) {
+                return true;
+            }
+            idle.idle();
+        }
+        return isConnected();
+    }
+
+    /**
+     * Waits only for the Aeron publication to report a connected state.
+     *
+     * <p>This is used on the publish path after
+     * {@link Publication#NOT_CONNECTED} is returned. It is intentionally
+     * narrower than {@link #awaitConnected(long)} because it is retrying a
+     * concrete publication operation that has already entered the send path.</p>
+     *
+     * @param deadline absolute deadline in {@link System#nanoTime()} units
+     * @param idle     idle strategy used while waiting
+     * @return {@code true} if the publication reconnects before the deadline
+     */
+    private boolean waitPublicationConnected(final long deadline, final IdleStrategy idle) {
+        while (running.get() && System.nanoTime() < deadline) {
+            if (publication.isConnected()) {
+                return true;
+            }
+            idle.idle();
+        }
+        return publication.isConnected();
     }
 
     private void dispatch(

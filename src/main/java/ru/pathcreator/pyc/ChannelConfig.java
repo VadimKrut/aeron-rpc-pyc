@@ -78,6 +78,7 @@ public final class ChannelConfig {
 
     private final IdleStrategyKind rxIdleStrategy;
     private final BackpressurePolicy backpressurePolicy;
+    private final ReconnectStrategy reconnectStrategy;
 
     private final int pendingPoolCapacity;
     private final int registryInitialCapacity;
@@ -102,6 +103,7 @@ public final class ChannelConfig {
         this.heartbeatMissedLimit = b.heartbeatMissedLimit;
         this.maxMessageSize = b.maxMessageSize;
         this.backpressurePolicy = b.backpressurePolicy;
+        this.reconnectStrategy = b.reconnectStrategy;
         this.rxIdleStrategy = b.rxIdleStrategy;
         this.pendingPoolCapacity = b.pendingPoolCapacity;
         this.registryInitialCapacity = b.registryInitialCapacity;
@@ -268,6 +270,21 @@ public final class ChannelConfig {
     }
 
     /**
+     * Returns the reconnect behavior used when a call starts or a publish
+     * attempt happens while the channel is temporarily disconnected.
+     *
+     * <p>{@link ReconnectStrategy#FAIL_FAST} preserves the old behavior and
+     * fails immediately. {@link ReconnectStrategy#WAIT_FOR_CONNECTION} waits
+     * for the existing Aeron publication and heartbeat path to become
+     * connected again within the call timeout.</p>
+     *
+     * @return reconnect strategy for this channel
+     */
+    public ReconnectStrategy reconnectStrategy() {
+        return reconnectStrategy;
+    }
+
+    /**
      * Возвращает idle-стратегию rx-потока.
      *
      * <p>Returns the receive thread idle strategy.</p>
@@ -394,6 +411,7 @@ public final class ChannelConfig {
 
         private IdleStrategyKind rxIdleStrategy = IdleStrategyKind.YIELDING;
         private BackpressurePolicy backpressurePolicy = BackpressurePolicy.BLOCK;
+        private ReconnectStrategy reconnectStrategy = ReconnectStrategy.FAIL_FAST;
 
         private int pendingPoolCapacity = 4096;
         private int registryInitialCapacity = 1024;
@@ -595,6 +613,24 @@ public final class ChannelConfig {
         }
 
         /**
+         * Sets how the channel should behave when a call begins or a publish
+         * attempt occurs while the underlying transport is not connected.
+         *
+         * <p>Use {@link ReconnectStrategy#FAIL_FAST} when the caller should
+         * immediately trigger fallback logic. Use
+         * {@link ReconnectStrategy#WAIT_FOR_CONNECTION} when short reconnect
+         * windows are acceptable and the request should wait for the current
+         * Aeron path to recover.</p>
+         *
+         * @param v reconnect strategy
+         * @return this builder
+         */
+        public Builder reconnectStrategy(final ReconnectStrategy v) {
+            this.reconnectStrategy = v;
+            return this;
+        }
+
+        /**
          * Задает idle-стратегию rx-потока.
          *
          * <p>Sets the receive thread idle strategy.</p>
@@ -710,6 +746,8 @@ public final class ChannelConfig {
                 throw new IllegalArgumentException("rxIdleStrategy is required");
             if (backpressurePolicy == null)
                 throw new IllegalArgumentException("backpressurePolicy is required");
+            if (reconnectStrategy == null)
+                throw new IllegalArgumentException("reconnectStrategy is required");
             return new ChannelConfig(this);
         }
     }

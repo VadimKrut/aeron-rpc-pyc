@@ -25,6 +25,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.LockSupport;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -62,7 +63,7 @@ public final class RpcLatencyHistogramMain {
                     options.burstSize);
 
             for (int i = 0; i < options.warmupIterations; i++) {
-                runPhase(context.client, request, options, options.warmupMessages, false);
+                runPhase(context.clients, request, options, options.warmupMessages, false);
             }
 
             System.out.printf(
@@ -78,7 +79,7 @@ public final class RpcLatencyHistogramMain {
             final Histogram result = newHistogram(options);
             long elapsedNs = 0L;
             for (int i = 0; i < options.measurementIterations; i++) {
-                final PhaseResult phase = runPhase(context.client, request, options, options.measurementMessages, true);
+                final PhaseResult phase = runPhase(context.clients, request, options, options.measurementMessages, true);
                 result.add(phase.histogram());
                 elapsedNs += phase.elapsedNs();
             }
@@ -97,9 +98,13 @@ public final class RpcLatencyHistogramMain {
         out.printf(Locale.ROOT, "Payload:              %,d bytes%n", options.payloadSize);
         out.printf(Locale.ROOT, "Target total rate:    %,d msg/s%n", options.rate);
         out.printf(Locale.ROOT, "Caller threads:       %,d%n", options.threads);
+        out.printf(Locale.ROOT, "Client channels:      %,d%n", options.channels);
+        out.printf(Locale.ROOT, "RX poller threads:    %,d%n", options.rxPollerThreads);
+        out.printf(Locale.ROOT, "RX fragment limit:    %,d%n", options.rxPollerFragmentLimit);
         out.printf(Locale.ROOT, "Target rate/thread:   %,.2f msg/s%n", options.rate / (double) options.threads);
         out.printf(Locale.ROOT, "Burst size/thread:    %,d%n", options.burstSize);
         out.printf(Locale.ROOT, "Handler mode:         %s%n", options.handlerMode);
+        out.printf(Locale.ROOT, "Handler IO delay:     %,d ns%n", options.handlerIoNanos);
         out.printf(Locale.ROOT, "RX idle strategy:     %s%n", options.idleStrategy);
         out.printf(Locale.ROOT, "Max tracked latency:  %,d us%n", TimeUnit.NANOSECONDS.toMicros(options.highestTrackableNs));
         out.printf(Locale.ROOT, "Significant digits:   %,d%n", options.significantDigits);
@@ -107,7 +112,7 @@ public final class RpcLatencyHistogramMain {
     }
 
     private static PhaseResult runPhase(
-            final RpcChannel client,
+            final RpcChannel[] clients,
             final byte[] request,
             final Options options,
             final int messages,
@@ -121,7 +126,13 @@ public final class RpcLatencyHistogramMain {
 
         for (int workerIndex = 0; workerIndex < options.threads; workerIndex++) {
             final int workerMessages = baseMessages + (workerIndex < remainder ? 1 : 0);
-            futures.add(executor.submit(new Worker(client, request, options, workerMessages, record, start)));
+            futures.add(executor.submit(new Worker(
+                    clients[workerIndex % clients.length],
+                    request,
+                    options,
+                    workerMessages,
+                    record,
+                    start)));
         }
 
         final long startedAt = System.nanoTime();
@@ -163,12 +174,15 @@ public final class RpcLatencyHistogramMain {
         System.out.println();
         System.out.printf(
                 Locale.ROOT,
-                "Histogram [aeron-rpc-udp-loopback-%db-rate=%d-threads=%d-burst=%d-handler=%s-idle=%s]:%n",
+                "Histogram [aeron-rpc-udp-loopback-%db-rate=%d-threads=%d-channels=%d-rxPollers=%d-burst=%d-handler=%s-ioNs=%d-idle=%s]:%n",
                 options.payloadSize,
                 options.rate,
                 options.threads,
+                options.channels,
+                options.rxPollerThreads,
                 options.burstSize,
                 options.handlerMode,
+                options.handlerIoNanos,
                 options.idleStrategy);
         histogram.outputPercentileDistribution(System.out, 1_000.0);
         System.out.println();
@@ -289,11 +303,11 @@ public final class RpcLatencyHistogramMain {
 
     private static final class BenchmarkContext implements AutoCloseable {
         private final RpcNode node;
-        private final RpcChannel client;
+        private final RpcChannel[] clients;
 
-        private BenchmarkContext(final RpcNode node, final RpcChannel client) {
+        private BenchmarkContext(final RpcNode node, final RpcChannel[] clients) {
             this.node = node;
-            this.client = client;
+            this.clients = clients;
         }
 
         static BenchmarkContext start(final Options options) throws InterruptedException {
@@ -305,27 +319,39 @@ public final class RpcLatencyHistogramMain {
             final RpcNode node = RpcNode.start(NodeConfig.builder()
                     .aeronDir(aeronDir)
                     .embeddedDriver(true)
+                    .sharedReceivePollerThreads(options.rxPollerThreads)
+                    .sharedReceivePollerFragmentLimit(options.rxPollerFragmentLimit)
                     .build());
 
-            final int basePort = 30_000 + ThreadLocalRandom.current().nextInt(10_000);
+            final int basePort = 30_000 + ThreadLocalRandom.current().nextInt(5_000);
             final int streamId = 2_001 + ThreadLocalRandom.current().nextInt(1_000);
-            final RpcChannel client = node.channel(config(
-                    "localhost:" + basePort,
-                    "localhost:" + (basePort + 1),
-                    streamId,
-                    options));
-            final RpcChannel server = node.channel(config(
-                    "localhost:" + (basePort + 1),
-                    "localhost:" + basePort,
-                    streamId,
-                    options));
+            final RpcChannel[] clients = new RpcChannel[options.channels];
+            final RpcChannel[] servers = new RpcChannel[options.channels];
 
-            server.onRaw(REQUEST_TYPE, RESPONSE_TYPE, echoHandler());
-            server.start();
-            client.start();
-            waitConnected(client, server);
+            for (int i = 0; i < options.channels; i++) {
+                final int channelBasePort = basePort + i * 2;
+                clients[i] = node.channel(config(
+                        "localhost:" + channelBasePort,
+                        "localhost:" + (channelBasePort + 1),
+                        streamId + i,
+                        options));
+                servers[i] = node.channel(config(
+                        "localhost:" + (channelBasePort + 1),
+                        "localhost:" + channelBasePort,
+                        streamId + i,
+                        options));
+                servers[i].onRaw(REQUEST_TYPE, RESPONSE_TYPE, echoHandler(options));
+            }
 
-            return new BenchmarkContext(node, client);
+            for (final RpcChannel server : servers) {
+                server.start();
+            }
+            for (final RpcChannel client : clients) {
+                client.start();
+            }
+            waitConnected(clients, servers);
+
+            return new BenchmarkContext(node, clients);
         }
 
         @Override
@@ -360,17 +386,27 @@ public final class RpcLatencyHistogramMain {
             return builder.build();
         }
 
-        private static RawRequestHandler echoHandler() {
+        private static RawRequestHandler echoHandler(final Options options) {
             return (requestBuffer, requestOffset, requestLength, responseBuffer, responseOffset, responseCapacity) -> {
+                if (options.handlerIoNanos > 0) {
+                    LockSupport.parkNanos(options.handlerIoNanos);
+                }
                 responseBuffer.putBytes(responseOffset, requestBuffer, requestOffset, requestLength);
                 return requestLength;
             };
         }
 
-        private static void waitConnected(final RpcChannel client, final RpcChannel server) throws InterruptedException {
+        private static void waitConnected(final RpcChannel[] clients, final RpcChannel[] servers) throws InterruptedException {
             final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
             while (System.nanoTime() < deadline) {
-                if (client.isConnected() && server.isConnected()) {
+                boolean connected = true;
+                for (final RpcChannel client : clients) {
+                    connected &= client.isConnected();
+                }
+                for (final RpcChannel server : servers) {
+                    connected &= server.isConnected();
+                }
+                if (connected) {
                     return;
                 }
                 Thread.sleep(10);
@@ -388,7 +424,11 @@ public final class RpcLatencyHistogramMain {
         private int payloadSize = 32;
         private int rate = 100_000;
         private int threads = 1;
+        private int channels = 1;
+        private int rxPollerThreads = 4;
+        private int rxPollerFragmentLimit = 16;
         private int burstSize = 1;
+        private long handlerIoNanos = 0;
         private int warmupIterations = 5;
         private int warmupMessages = 25_000;
         private int measurementIterations = 10;
@@ -411,7 +451,13 @@ public final class RpcLatencyHistogramMain {
                     case "payload" -> options.payloadSize = Integer.parseInt(value);
                     case "rate" -> options.rate = Integer.parseInt(value);
                     case "threads" -> options.threads = Integer.parseInt(value);
+                    case "channels" -> options.channels = Integer.parseInt(value);
+                    case "rx-poller-threads" -> options.rxPollerThreads = Integer.parseInt(value);
+                    case "rx-poller-fragment-limit" -> options.rxPollerFragmentLimit = Integer.parseInt(value);
                     case "burst-size" -> options.burstSize = Integer.parseInt(value);
+                    case "handler-io-nanos" -> options.handlerIoNanos = Long.parseLong(value);
+                    case "handler-io-micros" ->
+                            options.handlerIoNanos = TimeUnit.MICROSECONDS.toNanos(Long.parseLong(value));
                     case "warmup-iterations" -> options.warmupIterations = Integer.parseInt(value);
                     case "warmup-messages" -> options.warmupMessages = Integer.parseInt(value);
                     case "measurement-iterations" -> options.measurementIterations = Integer.parseInt(value);
@@ -438,8 +484,20 @@ public final class RpcLatencyHistogramMain {
             if (options.threads <= 0) {
                 throw new IllegalArgumentException("threads must be positive");
             }
+            if (options.channels <= 0) {
+                throw new IllegalArgumentException("channels must be positive");
+            }
+            if (options.rxPollerThreads <= 0) {
+                throw new IllegalArgumentException("rx-poller-threads must be positive");
+            }
+            if (options.rxPollerFragmentLimit <= 0) {
+                throw new IllegalArgumentException("rx-poller-fragment-limit must be positive");
+            }
             if (options.burstSize <= 0) {
                 throw new IllegalArgumentException("burst-size must be positive");
+            }
+            if (options.handlerIoNanos < 0) {
+                throw new IllegalArgumentException("handler-io-nanos must be zero or positive");
             }
             if (options.warmupIterations < 0) {
                 throw new IllegalArgumentException("warmup-iterations must be zero or positive");

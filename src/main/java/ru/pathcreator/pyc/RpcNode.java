@@ -46,12 +46,19 @@ public final class RpcNode implements AutoCloseable {
     private final Aeron aeron;
     private final MediaDriver mediaDriver;     // null, если внешний driver
     private final ExecutorService offloadExecutor;
+    private final SharedReceivePoller receivePoller;
     private final CopyOnWriteArrayList<RpcChannel> channels = new CopyOnWriteArrayList<>();
 
-    private RpcNode(final MediaDriver driver, final Aeron aeron, final ExecutorService exec) {
+    private RpcNode(
+            final MediaDriver driver,
+            final Aeron aeron,
+            final ExecutorService exec,
+            final SharedReceivePoller receivePoller
+    ) {
         this.mediaDriver = driver;
         this.aeron = aeron;
         this.offloadExecutor = exec;
+        this.receivePoller = receivePoller;
     }
 
     /**
@@ -99,7 +106,10 @@ public final class RpcNode implements AutoCloseable {
         // Общий executor виртуальных потоков для всех OFFLOAD-handler-ов всех каналов.
         // Шарится намеренно: уменьшает число carrier-ов и упрощает lifecycle.
         final ExecutorService exec = Executors.newVirtualThreadPerTaskExecutor();
-        return new RpcNode(driver, aeron, exec);
+        final SharedReceivePoller receivePoller = config.sharedReceivePoller()
+                ? new SharedReceivePoller(config.sharedReceivePollerThreads(), config.sharedReceivePollerFragmentLimit())
+                : null;
+        return new RpcNode(driver, aeron, exec, receivePoller);
     }
 
     /**
@@ -115,7 +125,7 @@ public final class RpcNode implements AutoCloseable {
      * @return новый RPC-канал / new RPC channel
      */
     public RpcChannel channel(final ChannelConfig channelConfig) {
-        final RpcChannel ch = new RpcChannel(channelConfig, aeron, offloadExecutor);
+        final RpcChannel ch = new RpcChannel(channelConfig, aeron, offloadExecutor, receivePoller);
         channels.add(ch);
         return ch;
     }
@@ -133,6 +143,9 @@ public final class RpcNode implements AutoCloseable {
             } catch (final Throwable t) { /* keep going */ }
         }
         channels.clear();
+        if (receivePoller != null) {
+            receivePoller.close();
+        }
         offloadExecutor.shutdown();
         CloseHelper.closeAll(aeron, mediaDriver);
     }

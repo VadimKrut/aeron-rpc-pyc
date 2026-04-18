@@ -27,6 +27,7 @@ class ChannelConfigTest {
         assertEquals(3, config.heartbeatMissedLimit());
         assertEquals(ChannelConfig.DEFAULT_MAX_MESSAGE_SIZE, config.maxMessageSize());
         assertEquals(BackpressurePolicy.BLOCK, config.backpressurePolicy());
+        assertEquals(ReconnectStrategy.FAIL_FAST, config.reconnectStrategy());
         assertEquals(IdleStrategyKind.YIELDING, config.rxIdleStrategy());
         assertFalse(config.isDirectExecutor());
     }
@@ -41,6 +42,17 @@ class ChannelConfigTest {
 
         assertTrue(config.isDirectExecutor());
         assertNotNull(config.offloadExecutor());
+    }
+
+    @Test
+    void canConfigureReconnectStrategy() {
+        final ChannelConfig config = ChannelConfig.builder()
+                .localEndpoint("localhost:40101")
+                .remoteEndpoint("localhost:40102")
+                .reconnectStrategy(ReconnectStrategy.WAIT_FOR_CONNECTION)
+                .build();
+
+        assertEquals(ReconnectStrategy.WAIT_FOR_CONNECTION, config.reconnectStrategy());
     }
 
     @Test
