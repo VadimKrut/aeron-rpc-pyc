@@ -1,6 +1,6 @@
 # Java Integration Examples
 
-This document shows how to use `aeron-rpc` from another Java project after you
+This document shows how to use `rpc-core` from another Java project after you
 add the dependency.
 
 The goal is to make integration copy-paste friendly:
@@ -15,11 +15,11 @@ The goal is to make integration copy-paste friendly:
 ## 1. Smallest Working Example
 
 ```java
-import ru.pathcreator.pyc.ChannelConfig;
-import ru.pathcreator.pyc.NodeConfig;
-import ru.pathcreator.pyc.RpcChannel;
-import ru.pathcreator.pyc.RpcNode;
-import ru.pathcreator.pyc.codec.MessageCodec;
+import ru.pathcreator.pyc.rpc.core.ChannelConfig;
+import ru.pathcreator.pyc.rpc.core.NodeConfig;
+import ru.pathcreator.pyc.rpc.core.RpcChannel;
+import ru.pathcreator.pyc.rpc.core.RpcNode;
+import ru.pathcreator.pyc.rpc.core.codec.MessageCodec;
 import org.agrona.DirectBuffer;
 import org.agrona.MutableDirectBuffer;
 
@@ -30,13 +30,13 @@ public final class MinimalExample {
     public static void main(String[] args) {
         RpcNode serverNode = RpcNode.start(
                 NodeConfig.builder()
-                        .aeronDir("/tmp/aeron-rpc-demo")
+                        .aeronDir("/tmp/rpc-core-demo")
                         .build()
         );
 
         RpcNode clientNode = RpcNode.start(
                 NodeConfig.builder()
-                        .aeronDir("/tmp/aeron-rpc-demo")
+                        .aeronDir("/tmp/rpc-core-demo")
                         .build()
         );
 
@@ -113,12 +113,12 @@ This is the profile we currently target for practical synchronous RPC:
 - reconnect waits instead of failing immediately
 
 ```java
-import ru.pathcreator.pyc.ChannelConfig;
-import ru.pathcreator.pyc.IdleStrategyKind;
-import ru.pathcreator.pyc.NodeConfig;
-import ru.pathcreator.pyc.ReconnectStrategy;
-import ru.pathcreator.pyc.RpcChannel;
-import ru.pathcreator.pyc.RpcNode;
+import ru.pathcreator.pyc.rpc.core.ChannelConfig;
+import ru.pathcreator.pyc.rpc.core.IdleStrategyKind;
+import ru.pathcreator.pyc.rpc.core.NodeConfig;
+import ru.pathcreator.pyc.rpc.core.ReconnectStrategy;
+import ru.pathcreator.pyc.rpc.core.RpcChannel;
+import ru.pathcreator.pyc.rpc.core.RpcNode;
 
 import java.time.Duration;
 import java.util.concurrent.ExecutorService;
@@ -132,7 +132,7 @@ public final class RecommendedProfileExample {
     public static void main(String[] args) {
         RpcNode node = RpcNode.start(
                 NodeConfig.builder()
-                        .aeronDir("/var/run/aeron-rpc")
+                        .aeronDir("/var/run/rpc-core")
                         .sharedReceivePoller(true)
                         .sharedReceivePollerThreads(2)
                         .sharedReceivePollerFragmentLimit(16)
@@ -148,7 +148,7 @@ public final class RecommendedProfileExample {
                         .offerTimeout(Duration.ofMillis(2))
                         .heartbeatInterval(Duration.ofMillis(250))
                         .heartbeatMissedLimit(3)
-                        .backpressurePolicy(ru.pathcreator.pyc.BackpressurePolicy.BLOCK)
+                        .backpressurePolicy(ru.pathcreator.pyc.rpc.core.BackpressurePolicy.BLOCK)
                         .reconnectStrategy(ReconnectStrategy.WAIT_FOR_CONNECTION)
                         .rxIdleStrategy(IdleStrategyKind.YIELDING)
                         .offloadExecutor(OFFLOAD_POOL)
@@ -260,7 +260,7 @@ logical connections.
 ```java
 RpcNode node = RpcNode.start(
         NodeConfig.builder()
-                .aeronDir("/var/run/aeron-rpc")
+                .aeronDir("/var/run/rpc-core")
                 .sharedReceivePoller(true)
                 .sharedReceivePollerThreads(2)
                 .sharedReceivePollerFragmentLimit(16)
@@ -345,7 +345,7 @@ Simple for local apps, tests, and standalone services.
 ```java
 RpcNode node = RpcNode.start(
         NodeConfig.builder()
-                .aeronDir("/tmp/aeron-rpc-demo")
+                .aeronDir("/tmp/rpc-core-demo")
                 .embeddedDriver(true)
                 .build()
 );
@@ -380,7 +380,7 @@ channel.call(
         responseCodec,
         Duration.ofMillis(10),
 
-ru.pathcreator.pyc.BackpressurePolicy.BLOCK
+ru.pathcreator.pyc.rpc.core.BackpressurePolicy.BLOCK
 );
 ```
 
@@ -402,7 +402,7 @@ channel.call(
         responseCodec,
         Duration.ofMillis(10),
 
-ru.pathcreator.pyc.BackpressurePolicy.FAIL_FAST
+ru.pathcreator.pyc.rpc.core.BackpressurePolicy.FAIL_FAST
 );
 ```
 
@@ -455,7 +455,7 @@ ChannelConfig config = ChannelConfig.builder()
         .heartbeatInterval(Duration.ofMillis(250))
         .heartbeatMissedLimit(3)
         .maxMessageSize(1024 * 1024)
-        .backpressurePolicy(ru.pathcreator.pyc.BackpressurePolicy.BLOCK)
+        .backpressurePolicy(ru.pathcreator.pyc.rpc.core.BackpressurePolicy.BLOCK)
         .reconnectStrategy(ReconnectStrategy.WAIT_FOR_CONNECTION)
         .rxIdleStrategy(IdleStrategyKind.YIELDING)
         .pendingPoolCapacity(8192)
@@ -498,7 +498,7 @@ What each setting is for:
 
 ```java
 NodeConfig config = NodeConfig.builder()
-        .aeronDir("/var/run/aeron-rpc")
+        .aeronDir("/var/run/rpc-core")
         .embeddedDriver(false)
         .sharedReceivePoller(true)
         .sharedReceivePollerThreads(2)
@@ -540,8 +540,8 @@ Built-in transport statuses use HTTP-like numeric codes:
 Application handlers can return their own business errors:
 
 ```java
-import ru.pathcreator.pyc.exceptions.RpcApplicationException;
-import ru.pathcreator.pyc.exceptions.RpcStatus;
+import ru.pathcreator.pyc.rpc.core.exceptions.RpcApplicationException;
+import ru.pathcreator.pyc.rpc.core.exceptions.RpcStatus;
 
 server.onRequest(
         1,

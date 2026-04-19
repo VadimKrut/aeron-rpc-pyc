@@ -52,9 +52,9 @@ If a vulnerability affects an older version, the fix will usually be released in
 
 ## Область ответственности / Security Scope
 
-`aeron-rpc` - это транспортная RPC-библиотека для low-latency систем. Она не предоставляет встроенные механизмы:
+`rpc-core` - это транспортная RPC-библиотека для low-latency систем. Она не предоставляет встроенные механизмы:
 
-`aeron-rpc` is a transport RPC library for low-latency systems. It does not provide built-in:
+`rpc-core` is a transport RPC library for low-latency systems. It does not provide built-in:
 
 - аутентификации;
 - авторизации;

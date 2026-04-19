@@ -16,7 +16,7 @@ mvn -Pbenchmarks -DskipTests package
 The benchmark jar will be written to:
 
 ```text
-target/aeron-rpc-benchmarks.jar
+target/rpc-core-benchmarks.jar
 ```
 
 On Java 25, run benchmarks with:
@@ -30,7 +30,7 @@ On Java 25, run benchmarks with:
 Main class:
 
 ```text
-ru.pathcreator.pyc.bench.RpcLatencyHistogramMain
+ru.pathcreator.pyc.rpc.core.bench.RpcLatencyHistogramMain
 ```
 
 This benchmark measures the full synchronous round trip:
@@ -65,8 +65,8 @@ For blocking or I/O-like handlers:
 
 ```bash
 java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
-  -cp target/aeron-rpc-benchmarks.jar \
-  ru.pathcreator.pyc.bench.RpcLatencyHistogramMain \
+  -cp target/rpc-core-benchmarks.jar \
+  ru.pathcreator.pyc.rpc.core.bench.RpcLatencyHistogramMain \
   --payload=32 \
   --rate=150000 \
   --threads=8 \
@@ -93,8 +93,8 @@ Why this profile:
 
 ```bash
 java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
-  -cp target/aeron-rpc-benchmarks.jar \
-  ru.pathcreator.pyc.bench.RpcLatencyHistogramMain \
+  -cp target/rpc-core-benchmarks.jar \
+  ru.pathcreator.pyc.rpc.core.bench.RpcLatencyHistogramMain \
   --payload=32 \
   --rate=100000 \
   --threads=1 \
@@ -115,8 +115,8 @@ Use this to understand transport overhead without caller contention.
 
 ```bash
 java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
-  -cp target/aeron-rpc-benchmarks.jar \
-  ru.pathcreator.pyc.bench.RpcLatencyHistogramMain \
+  -cp target/rpc-core-benchmarks.jar \
+  ru.pathcreator.pyc.rpc.core.bench.RpcLatencyHistogramMain \
   --payload=32 \
   --rate=150000 \
   --threads=8 \
@@ -137,8 +137,8 @@ This is the "many callers compete for one `ConcurrentPublication`" scenario.
 
 ```bash
 java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
-  -cp target/aeron-rpc-benchmarks.jar \
-  ru.pathcreator.pyc.bench.RpcLatencyHistogramMain \
+  -cp target/rpc-core-benchmarks.jar \
+  ru.pathcreator.pyc.rpc.core.bench.RpcLatencyHistogramMain \
   --payload=32 \
   --rate=150000 \
   --threads=8 \
@@ -159,8 +159,8 @@ This is the most relevant scenario if users will create many `RpcChannel`s on on
 
 ```bash
 java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
-  -cp target/aeron-rpc-benchmarks.jar \
-  ru.pathcreator.pyc.bench.RpcLatencyHistogramMain \
+  -cp target/rpc-core-benchmarks.jar \
+  ru.pathcreator.pyc.rpc.core.bench.RpcLatencyHistogramMain \
   --payload=32 \
   --rate=20000 \
   --threads=8 \
@@ -233,7 +233,7 @@ There is no universal best number. Measure on the target machine.
 
 ## Comparison With Raw Aeron
 
-Raw Aeron echo benchmarks will usually look better than `aeron-rpc` because raw Aeron does less work:
+Raw Aeron echo benchmarks will usually look better than `rpc-core` because raw Aeron does less work:
 
 - no request/response API layer
 - no pending-call registry
@@ -270,14 +270,14 @@ List JMH benchmarks:
 
 ```bash
 java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
-  -jar target/aeron-rpc-benchmarks.jar -l
+  -jar target/rpc-core-benchmarks.jar -l
 ```
 
 Run JMH benchmark:
 
 ```bash
 java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
-  -jar target/aeron-rpc-benchmarks.jar RpcChannelBenchmark
+  -jar target/rpc-core-benchmarks.jar RpcChannelBenchmark
 ```
 
 ## Validation Beyond Benchmarks

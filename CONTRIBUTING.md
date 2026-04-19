@@ -4,9 +4,9 @@
 
 Thank you for your interest in the project.
 
-`aeron-rpc` - это low-latency RPC-библиотека поверх Aeron. Главные приоритеты проекта: минимальная задержка, предсказуемое поведение, стабильная производительность и поддерживаемый код.
+`rpc-core` - это low-latency RPC-библиотека поверх Aeron. Главные приоритеты проекта: минимальная задержка, предсказуемое поведение, стабильная производительность и поддерживаемый код.
 
-`aeron-rpc` is a low-latency RPC library built on top of Aeron. The main priorities are low latency, predictable behavior, stable performance, and maintainable code.
+`rpc-core` is a low-latency RPC library built on top of Aeron. The main priorities are low latency, predictable behavior, stable performance, and maintainable code.
 
 ---
 

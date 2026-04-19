@@ -5,13 +5,13 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>ru.pathcreator.pyc</groupId>
-    <artifactId>aeron-rpc</artifactId>
-    <version>0.0.7</version>
+    <artifactId>rpc-core</artifactId>
+    <version>0.0.8</version>
     <packaging>jar</packaging>
 
-    <name>aeron-rpc</name>
+    <name>rpc-core</name>
     <description>Synchronous-style RPC over Aeron for Java</description>
-    <url>https://gitverse.ru/VadimKrut/aeron-rpc-pyc</url>
+    <url>https://gitverse.ru/VadimKrut/rpc-core</url>
 
     <licenses>
         <license>
@@ -29,9 +29,9 @@
     </developers>
 
     <scm>
-        <connection>scm:git:https://gitverse.ru/VadimKrut/aeron-rpc-pyc.git</connection>
-        <developerConnection>scm:git:https://gitverse.ru/VadimKrut/aeron-rpc-pyc.git</developerConnection>
-        <url>https://gitverse.ru/VadimKrut/aeron-rpc-pyc</url>
+        <connection>scm:git:https://gitverse.ru/VadimKrut/rpc-core.git</connection>
+        <developerConnection>scm:git:https://gitverse.ru/VadimKrut/rpc-core.git</developerConnection>
+        <url>https://gitverse.ru/VadimKrut/rpc-core</url>
         <tag>HEAD</tag>
     </scm>
 
@@ -93,6 +93,7 @@
     </dependencies>
 
     <build>
+        <finalName>rpc-core</finalName>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -163,12 +164,12 @@
                 <repository>
                     <id>github</id>
                     <name>GitHub Packages</name>
-                    <url>https://maven.pkg.github.com/vadimkrut/aeron-rpc-pyc</url>
+                    <url>https://maven.pkg.github.com/vadimkrut/rpc-core</url>
                 </repository>
                 <snapshotRepository>
                     <id>github</id>
                     <name>GitHub Packages</name>
-                    <url>https://maven.pkg.github.com/vadimkrut/aeron-rpc-pyc</url>
+                    <url>https://maven.pkg.github.com/vadimkrut/rpc-core</url>
                 </snapshotRepository>
             </distributionManagement>
         </profile>
@@ -242,7 +243,7 @@
                                     <goal>shade</goal>
                                 </goals>
                                 <configuration>
-                                    <finalName>aeron-rpc-benchmarks</finalName>
+                                    <finalName>rpc-core-benchmarks</finalName>
                                     <createDependencyReducedPom>false</createDependencyReducedPom>
                                     <transformers>
                                         <transformer

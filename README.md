@@ -1,4 +1,4 @@
-# aeron-rpc
+# rpc-core
 
 Synchronous request/response RPC over Aeron UDP for low-latency Java systems.
 
@@ -14,7 +14,7 @@ The library keeps a blocking `call()` API while the transport path is tuned for:
 Many low-latency transports push users into async/reactive code even when the business flow is naturally
 request/response.
 
-`aeron-rpc` is for the opposite case:
+`rpc-core` is for the opposite case:
 
 - you want Aeron UDP
 - you want a normal blocking API
@@ -47,8 +47,8 @@ request/response.
 <dependencies>
 <dependency>
     <groupId>ru.pathcreator.pyc</groupId>
-    <artifactId>aeron-rpc</artifactId>
-    <version>0.0.7</version>
+    <artifactId>rpc-core</artifactId>
+    <version>0.0.8</version>
 </dependency>
 </dependencies>
 ```
@@ -63,7 +63,7 @@ configure:
 <repositories>
     <repository>
         <id>github</id>
-        <url>https://maven.pkg.github.com/vadimkrut/aeron-rpc-pyc</url>
+        <url>https://maven.pkg.github.com/vadimkrut/rpc-core</url>
         <snapshots>
             <enabled>true</enabled>
         </snapshots>
@@ -73,8 +73,8 @@ configure:
 <dependencies>
 <dependency>
     <groupId>ru.pathcreator.pyc</groupId>
-    <artifactId>aeron-rpc</artifactId>
-    <version>0.0.7</version>
+    <artifactId>rpc-core</artifactId>
+    <version>0.0.8</version>
 </dependency>
 </dependencies>
 ```
