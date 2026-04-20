@@ -35,4 +35,34 @@ public final class RemoteRpcException extends RpcException {
     public RpcStatus status() {
         return RpcStatus.fromCode(statusCode);
     }
+
+    /**
+     * Returns whether the remote status is known to be retryable.
+     *
+     * @return {@code true} for retryable built-in statuses
+     */
+    public boolean isRetryable() {
+        final RpcStatus status = status();
+        return status != null && status.isRetryable();
+    }
+
+    /**
+     * Returns whether the remote status belongs to the built-in client-error range.
+     *
+     * @return {@code true} when the remote status is a built-in client error
+     */
+    public boolean isClientError() {
+        final RpcStatus status = status();
+        return status != null && status.isClientError();
+    }
+
+    /**
+     * Returns whether the remote status belongs to the built-in server-error range.
+     *
+     * @return {@code true} when the remote status is a built-in server error
+     */
+    public boolean isServerError() {
+        final RpcStatus status = status();
+        return status != null && status.isServerError();
+    }
 }

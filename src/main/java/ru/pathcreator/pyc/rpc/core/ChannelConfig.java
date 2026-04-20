@@ -1,6 +1,8 @@
 package ru.pathcreator.pyc.rpc.core;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 
 /**
@@ -80,6 +82,12 @@ public final class ChannelConfig {
     private final IdleStrategyKind rxIdleStrategy;
     private final BackpressurePolicy backpressurePolicy;
     private final ReconnectStrategy reconnectStrategy;
+    private final boolean protocolHandshakeEnabled;
+    private final int protocolVersion;
+    private final long protocolCapabilities;
+    private final long requiredRemoteCapabilities;
+    private final Duration protocolHandshakeTimeout;
+    private final RpcChannelListener[] listeners;
 
     private final int pendingPoolCapacity;
     private final int registryInitialCapacity;
@@ -105,6 +113,12 @@ public final class ChannelConfig {
         this.maxMessageSize = b.maxMessageSize;
         this.backpressurePolicy = b.backpressurePolicy;
         this.reconnectStrategy = b.reconnectStrategy;
+        this.protocolHandshakeEnabled = b.protocolHandshakeEnabled;
+        this.protocolVersion = b.protocolVersion;
+        this.protocolCapabilities = b.protocolCapabilities;
+        this.requiredRemoteCapabilities = b.requiredRemoteCapabilities;
+        this.protocolHandshakeTimeout = b.protocolHandshakeTimeout;
+        this.listeners = b.listeners.toArray(RpcChannelListener[]::new);
         this.rxIdleStrategy = b.rxIdleStrategy;
         this.pendingPoolCapacity = b.pendingPoolCapacity;
         this.registryInitialCapacity = b.registryInitialCapacity;
@@ -286,6 +300,61 @@ public final class ChannelConfig {
     }
 
     /**
+     * Returns whether the optional protocol compatibility handshake is enabled.
+     *
+     * @return {@code true} if the handshake is enabled
+     */
+    public boolean protocolHandshakeEnabled() {
+        return protocolHandshakeEnabled;
+    }
+
+    /**
+     * Returns the local protocol version advertised by this channel.
+     *
+     * @return local protocol version
+     */
+    public int protocolVersion() {
+        return protocolVersion;
+    }
+
+    /**
+     * Returns the local capability bitmask advertised by this channel.
+     *
+     * @return local protocol capabilities
+     */
+    public long protocolCapabilities() {
+        return protocolCapabilities;
+    }
+
+    /**
+     * Returns the required remote capability bits when the optional handshake
+     * is enabled.
+     *
+     * @return required remote capabilities
+     */
+    public long requiredRemoteCapabilities() {
+        return requiredRemoteCapabilities;
+    }
+
+    /**
+     * Returns the timeout used by the optional protocol handshake.
+     *
+     * @return protocol handshake timeout
+     */
+    public Duration protocolHandshakeTimeout() {
+        return protocolHandshakeTimeout;
+    }
+
+    /**
+     * Returns the configured optional channel listeners.
+     *
+     * @return channel listeners, possibly empty
+     */
+    public RpcChannelListener[] listeners() {
+        return listeners.clone();
+    }
+
+    /**
      * Возвращает idle-стратегию rx-потока.
      *
      * <p>Returns the receive thread idle strategy.</p>
@@ -413,6 +482,12 @@ public final class ChannelConfig {
         private IdleStrategyKind rxIdleStrategy = IdleStrategyKind.YIELDING;
         private BackpressurePolicy backpressurePolicy = BackpressurePolicy.BLOCK;
         private ReconnectStrategy reconnectStrategy = ReconnectStrategy.FAIL_FAST;
+        private boolean protocolHandshakeEnabled = false;
+        private int protocolVersion = 1;
+        private long protocolCapabilities = 0L;
+        private long requiredRemoteCapabilities = 0L;
+        private Duration protocolHandshakeTimeout = Duration.ofSeconds(1);
+        private final List<RpcChannelListener> listeners = new ArrayList<>();
 
         private int pendingPoolCapacity = 4096;
         private int registryInitialCapacity = 1024;
@@ -632,6 +707,84 @@ public final class ChannelConfig {
         }
 
         /**
+         * Enables or disables the optional protocol compatibility handshake.
+         *
+         * <p>When enabled, the first outbound call performs one control-plane
+         * handshake with the peer and verifies version/capabilities before
+         * user traffic proceeds. This adds cost only to the first contact and
+         * remains disabled by default.</p>
+         *
+         * @param v {@code true} to enable the protocol handshake
+         * @return this builder
+         */
+        public Builder protocolHandshakeEnabled(final boolean v) {
+            this.protocolHandshakeEnabled = v;
+            return this;
+        }
+
+        /**
+         * Sets the local protocol version advertised by this channel.
+         *
+         * @param v local protocol version
+         * @return this builder
+         */
+        public Builder protocolVersion(final int v) {
+            this.protocolVersion = v;
+            return this;
+        }
+
+        /**
+         * Sets the local capability bitmask advertised by this channel.
+         *
+         * @param v local capability bitmask
+         * @return this builder
+         */
+        public Builder protocolCapabilities(final long v) {
+            this.protocolCapabilities = v;
+            return this;
+        }
+
+        /**
+         * Sets the capability bitmask that must be present on the remote side
+         * when the optional protocol handshake is enabled.
+         *
+         * @param v required remote capabilities
+         * @return this builder
+         */
+        public Builder requiredRemoteCapabilities(final long v) {
+            this.requiredRemoteCapabilities = v;
+            return this;
+        }
+
+        /**
+         * Sets the timeout used by the optional protocol handshake.
+         *
+         * @param v handshake timeout
+         * @return this builder
+         */
+        public Builder protocolHandshakeTimeout(final Duration v) {
+            this.protocolHandshakeTimeout = v;
+            return this;
+        }
+
+        /**
+         * Adds an optional listener for channel events.
+         *
+         * <p>Listeners are opt-in. When none are configured, the fast path
+         * remains unchanged except for a single empty-array check before
+         * dispatching events.</p>
+         *
+         * @param v listener to add
+         * @return this builder
+         */
+        public Builder listener(final RpcChannelListener v) {
+            if (v != null) {
+                this.listeners.add(v);
+            }
+            return this;
+        }
+
+        /**
          * Задает idle-стратегию rx-потока.
          *
          * <p>Sets the receive thread idle strategy.</p>
@@ -749,6 +902,10 @@ public final class ChannelConfig {
                 throw new IllegalArgumentException("backpressurePolicy is required");
             if (reconnectStrategy == null)
                 throw new IllegalArgumentException("reconnectStrategy is required");
+            if (protocolVersion < 1)
+                throw new IllegalArgumentException("protocolVersion >= 1");
+            if (protocolHandshakeTimeout == null || protocolHandshakeTimeout.isZero() || protocolHandshakeTimeout.isNegative())
+                throw new IllegalArgumentException("protocolHandshakeTimeout must be positive");
             return new ChannelConfig(this);
         }
     }

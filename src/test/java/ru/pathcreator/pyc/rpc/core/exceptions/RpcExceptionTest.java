@@ -69,6 +69,30 @@ class RpcExceptionTest {
 
         assertEquals(1001, exception.statusCode());
         assertNull(exception.status());
+        assertFalse(exception.isRetryable());
+    }
+
+    @Test
+    void statusHelpersClassifyBuiltInStatuses() {
+        assertTrue(RpcStatus.OK.isSuccess());
+        assertTrue(RpcStatus.BAD_REQUEST.isClientError());
+        assertTrue(RpcStatus.INTERNAL_SERVER_ERROR.isServerError());
+        assertTrue(RpcStatus.SERVICE_UNAVAILABLE.isRetryable());
+        assertFalse(RpcStatus.BAD_REQUEST.isRetryable());
+    }
+
+    @Test
+    void remoteExceptionExposesStatusHelpers() {
+        final RemoteRpcException retryable = new RemoteRpcException(503, "busy");
+        final RemoteRpcException clientError = new RemoteRpcException(400, "bad request");
+
+        assertTrue(retryable.isRetryable());
+        assertTrue(retryable.isServerError());
+        assertFalse(retryable.isClientError());
+
+        assertFalse(clientError.isRetryable());
+        assertTrue(clientError.isClientError());
+        assertFalse(clientError.isServerError());
     }
 
     @Test

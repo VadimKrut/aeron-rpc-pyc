@@ -15,10 +15,12 @@ import ru.pathcreator.pyc.rpc.core.exceptions.*;
 import ru.pathcreator.pyc.rpc.core.internal.*;
 
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -84,6 +86,29 @@ public final class RpcChannel implements AutoCloseable {
 
     private static final int MIN_USER_MESSAGE_TYPE_ID = 1;
     private static final int ERROR_STATUS_CODE_SIZE = Integer.BYTES;
+    private static final int PROTOCOL_INFO_LENGTH = Integer.BYTES + Long.BYTES;
+
+    private static final MessageCodec<ProtocolInfo> PROTOCOL_INFO_CODEC = new MessageCodec<>() {
+        @Override
+        public int encode(final ProtocolInfo message, final MutableDirectBuffer buffer, final int offset) {
+            buffer.putInt(offset, message.version, ByteOrder.LITTLE_ENDIAN);
+            buffer.putLong(offset + Integer.BYTES, message.capabilities, ByteOrder.LITTLE_ENDIAN);
+            return PROTOCOL_INFO_LENGTH;
+        }
+
+        @Override
+        public ProtocolInfo decode(final DirectBuffer buffer, final int offset, final int length) {
+            if (length != PROTOCOL_INFO_LENGTH) {
+                throw new IllegalArgumentException("Invalid protocol info length: " + length);
+            }
+            return new ProtocolInfo(
+                    buffer.getInt(offset, ByteOrder.LITTLE_ENDIAN),
+                    buffer.getLong(offset + Integer.BYTES, ByteOrder.LITTLE_ENDIAN));
+        }
+    };
+
+    private record ProtocolInfo(int version, long capabilities) {
+    }
 
     // ---- handler entry types ----
     private static abstract class HandlerEntry {
@@ -121,12 +146,43 @@ public final class RpcChannel implements AutoCloseable {
 
     // ---- fields ----
     private final ChannelConfig config;
+    private final Aeron aeron;
     private final boolean directExecutor;
     private final ExecutorService offloadExecutor;
     private final SharedReceivePoller receivePoller;
+    private final ReconnectStrategy reconnectStrategy;
+    private final boolean recreateTransportOnDisconnect;
+    private final boolean protocolHandshakeEnabled;
+    private final long offerTimeoutNs;
+    private final long protocolHandshakeTimeoutNs;
+    private final int maxMessageSize;
+    private final int protocolVersion;
+    private final long protocolCapabilities;
+    private final long requiredRemoteCapabilities;
+    private final Object transportLock = new Object();
+    private final Object handshakeLock = new Object();
+    private final Object drainLock = new Object();
+    private final RpcChannelListener[] listeners;
+    private final RpcChannelListener singleListener;
+    private final boolean hasListeners;
+    private final boolean callEventListeners;
+    private final boolean remoteErrorListeners;
+    private final boolean channelStateListeners;
+    private final boolean drainStateListeners;
+    private final boolean reconnectStateListeners;
+    private final boolean protocolHandshakeListeners;
+    private volatile boolean draining;
+    private final AtomicInteger inFlightHandlers = new AtomicInteger();
+    private volatile boolean protocolHandshakeComplete;
+    private volatile int remoteProtocolVersion;
+    private volatile long remoteProtocolCapabilities;
 
-    private final Subscription subscription;
-    private final ConcurrentPublication publication;
+    private volatile Subscription subscription;
+    private volatile ConcurrentPublication publication;
+    private final Subscription steadySubscription;
+    private final ConcurrentPublication steadyPublication;
+    private final String outboundChannel;
+    private final String inboundChannel;
 
     /**
      * Read-only after start().
@@ -210,7 +266,33 @@ public final class RpcChannel implements AutoCloseable {
             final SharedReceivePoller receivePoller
     ) {
         this.config = config;
+        this.aeron = aeron;
         this.receivePoller = receivePoller;
+        this.reconnectStrategy = config.reconnectStrategy();
+        this.recreateTransportOnDisconnect = reconnectStrategy == ReconnectStrategy.RECREATE_ON_DISCONNECT;
+        this.protocolHandshakeEnabled = config.protocolHandshakeEnabled();
+        this.offerTimeoutNs = config.offerTimeout().toNanos();
+        this.protocolHandshakeTimeoutNs = config.protocolHandshakeTimeout().toNanos();
+        this.maxMessageSize = config.maxMessageSize();
+        this.protocolVersion = config.protocolVersion();
+        this.protocolCapabilities = config.protocolCapabilities();
+        this.requiredRemoteCapabilities = config.requiredRemoteCapabilities();
+        this.listeners = config.listeners();
+        this.singleListener = listeners.length == 1 ? listeners[0] : null;
+        this.hasListeners = listeners.length != 0;
+        this.callEventListeners = hasListenerOverride("onCallStarted", int.class, long.class)
+                                  || hasListenerOverride("onCallSucceeded", int.class, long.class)
+                                  || hasListenerOverride("onCallTimedOut", int.class, long.class, long.class)
+                                  || hasListenerOverride("onCallFailed", int.class, long.class, RpcException.class);
+        this.remoteErrorListeners = hasListenerOverride("onRemoteError", int.class, long.class, RpcException.class);
+        this.channelStateListeners = hasListenerOverride("onChannelUp") || hasListenerOverride("onChannelDown");
+        this.drainStateListeners = hasListenerOverride("onDrainStarted") || hasListenerOverride("onDrainFinished");
+        this.reconnectStateListeners = hasListenerOverride("onReconnectAttempt", ReconnectStrategy.class)
+                                       || hasListenerOverride("onReconnectSucceeded", ReconnectStrategy.class)
+                                       || hasListenerOverride("onReconnectFailed", ReconnectStrategy.class, Throwable.class);
+        this.protocolHandshakeListeners = hasListenerOverride("onProtocolHandshakeStarted")
+                                          || hasListenerOverride("onProtocolHandshakeSucceeded", int.class, long.class)
+                                          || hasListenerOverride("onProtocolHandshakeFailed", RpcException.class);
         final boolean direct = config.isDirectExecutor();
         this.directExecutor = direct;
         if (direct) {
@@ -234,18 +316,21 @@ public final class RpcChannel implements AutoCloseable {
 
         // ConcurrentPublication: несколько caller-ов могут tryClaim/offer
         // одновременно без нашего локинга.
-        this.publication = aeron.addPublication(outbound.build(), config.streamId());
-        final String inbound = new ChannelUriStringBuilder()
+        this.outboundChannel = outbound.build();
+        this.publication = aeron.addPublication(outboundChannel, config.streamId());
+        this.steadyPublication = this.publication;
+        this.inboundChannel = new ChannelUriStringBuilder()
                 .media("udp")
                 .endpoint(config.localEndpoint())
                 .reliable(true)
                 .build();
-        this.subscription = aeron.addSubscription(inbound, config.streamId());
+        this.subscription = aeron.addSubscription(inboundChannel, config.streamId());
+        this.steadySubscription = this.subscription;
 
         // Pools
         this.pendingPool = new PendingCallPool(config.pendingPoolCapacity());
         this.pendingRegistry = new PendingCallRegistry(config.registryInitialCapacity());
-        final int staging = Math.min(config.maxMessageSize(), 4096);
+        final int staging = Math.min(maxMessageSize, 4096);
         this.txStaging = ThreadLocal.withInitial(() -> new UnsafeBuffer(ByteBuffer.allocateDirect(staging)));
         this.offloadTaskPool = new OffloadTask.Pool(config.offloadTaskPoolSize());
         this.offloadCopyBufferSize = config.offloadCopyBufferSize();
@@ -340,6 +425,10 @@ public final class RpcChannel implements AutoCloseable {
         if (!running.compareAndSet(false, true)) {
             throw new IllegalStateException("already started");
         }
+        draining = false;
+        protocolHandshakeComplete = false;
+        remoteProtocolVersion = 0;
+        remoteProtocolCapabilities = 0L;
         if (receivePoller == null) {
             rxThread.start();
         } else {
@@ -356,6 +445,7 @@ public final class RpcChannel implements AutoCloseable {
     @Override
     public void close() {
         running.set(false);
+        draining = true;
         if (receivePoller != null) {
             receivePoller.unregister(this);
         }
@@ -371,7 +461,74 @@ public final class RpcChannel implements AutoCloseable {
             pc.completeFail("channel closed");
             pendingPool.release(pc);
         });
-        CloseHelper.closeAll(subscription, publication);
+        synchronized (transportLock) {
+            CloseHelper.closeAll(subscription, publication);
+        }
+    }
+
+    /**
+     * Enables drain mode for this channel.
+     *
+     * <p>While draining, new outgoing calls are rejected locally and new
+     * incoming user requests are rejected with a structured remote
+     * {@link RpcStatus#SERVICE_UNAVAILABLE} error. In-flight work is allowed
+     * to finish.</p>
+     */
+    public void beginDrain() {
+        if (!draining) {
+            synchronized (drainLock) {
+                if (!draining) {
+                    draining = true;
+                    notifyDrainStarted();
+                }
+            }
+        }
+    }
+
+    /**
+     * Returns whether the channel is currently in drain mode.
+     *
+     * @return {@code true} if drain mode is active
+     */
+    public boolean isDraining() {
+        return draining;
+    }
+
+    /**
+     * Waits until the channel has no in-flight client calls and no in-flight
+     * server handlers.
+     *
+     * @param timeout timeout value
+     * @param unit    timeout unit
+     * @return {@code true} if the channel drained in time
+     */
+    public boolean awaitDrained(final long timeout, final TimeUnit unit) {
+        final long deadline = System.nanoTime() + unit.toNanos(timeout);
+        final IdleStrategy idle = txIdleTl.get();
+        idle.reset();
+        while (System.nanoTime() < deadline) {
+            if (pendingRegistry.size() == 0 && inFlightHandlers.get() == 0) {
+                notifyDrainFinished();
+                return true;
+            }
+            idle.idle();
+        }
+        return pendingRegistry.size() == 0 && inFlightHandlers.get() == 0;
+    }
+
+    /**
+     * Starts drain mode, waits for in-flight work to finish, and closes the
+     * channel.
+     *
+     * @param timeout timeout value
+     * @param unit    timeout unit
+     * @return {@code true} if the channel drained before close
+     */
+    public boolean closeGracefully(final long timeout, final TimeUnit unit) {
+        beginDrain();
+        final boolean drained = awaitDrained(timeout, unit);
+        close();
+        return drained;
     }
 
     /**
@@ -384,7 +541,56 @@ public final class RpcChannel implements AutoCloseable {
      * {@code true} if the channel is considered connected
      */
     public boolean isConnected() {
-        return publication.isConnected() && heartbeat.isConnected();
+        return currentPublication().isConnected() && heartbeat.isConnected();
+    }
+
+    /**
+     * Returns whether the optional protocol handshake has already completed.
+     *
+     * @return {@code true} if protocol compatibility is already established
+     */
+    public boolean isProtocolHandshakeComplete() {
+        return protocolHandshakeComplete;
+    }
+
+    /**
+     * Returns the negotiated remote protocol version, or {@code 0} when the
+     * optional handshake has not completed yet.
+     *
+     * @return remote protocol version
+     */
+    public int remoteProtocolVersion() {
+        return remoteProtocolVersion;
+    }
+
+    /**
+     * Returns the negotiated remote capability bitmask, or {@code 0} when the
+     * optional handshake has not completed yet.
+     *
+     * @return remote protocol capabilities
+     */
+    public long remoteProtocolCapabilities() {
+        return remoteProtocolCapabilities;
+    }
+
+    /**
+     * Explicitly triggers reconnect handling according to the configured
+     * {@link ReconnectStrategy}.
+     *
+     * <p>For {@link ReconnectStrategy#WAIT_FOR_CONNECTION} this waits for the
+     * current path to reconnect. For
+     * {@link ReconnectStrategy#RECREATE_ON_DISCONNECT} this rebuilds the local
+     * transport resources first and then waits for the channel to come back.</p>
+     *
+     * @param timeout timeout value
+     * @param unit    timeout unit
+     * @return {@code true} if the channel is connected after the reconnect attempt
+     */
+    public boolean reconnectNow(final long timeout, final TimeUnit unit) {
+        if (recreateTransportOnDisconnect) {
+            attemptTransportReconnect();
+        }
+        return awaitConnected(unit.toNanos(timeout));
     }
 
     // ================================================================
@@ -472,14 +678,48 @@ public final class RpcChannel implements AutoCloseable {
             final long timeoutNs,
             final BackpressurePolicy policy
     ) {
-        validateUserMessageTypeId(requestMessageTypeId);
-        validateUserMessageTypeId(expectedResponseTypeId);
+        return callInternal(
+                requestMessageTypeId,
+                expectedResponseTypeId,
+                request,
+                reqCodec,
+                respCodec,
+                timeoutNs,
+                policy,
+                true,
+                true);
+    }
+
+    private <Req, Resp> Resp callInternal(
+            final int requestMessageTypeId,
+            final int expectedResponseTypeId,
+            final Req request,
+            final MessageCodec<Req> reqCodec,
+            final MessageCodec<Resp> respCodec,
+            final long timeoutNs,
+            final BackpressurePolicy policy,
+            final boolean validateTypes,
+            final boolean ensureProtocolHandshake
+    ) {
+        if (validateTypes) {
+            validateUserMessageTypeId(requestMessageTypeId);
+            validateUserMessageTypeId(expectedResponseTypeId);
+        }
+        if (draining) {
+            throw new RpcException("channel is draining");
+        }
+        if (ensureProtocolHandshake && protocolHandshakeEnabled && !protocolHandshakeComplete) {
+            ensureProtocolHandshake(timeoutNs);
+        }
         if (!awaitConnected(timeoutNs)) {
             throw new NotConnectedException("channel not connected: " + config.remoteEndpoint());
         }
         final PendingCall call = pendingPool.acquire();
         final long correlationId = correlations.next();
         call.prepare(Thread.currentThread(), correlationId, expectedResponseTypeId);
+        if (callEventListeners) {
+            notifyCallStarted(requestMessageTypeId, correlationId);
+        }
         pendingRegistry.register(correlationId, call);
         try {
             // 1. Encode в staging.
@@ -492,8 +732,8 @@ public final class RpcChannel implements AutoCloseable {
                 payloadLen = reqCodec.encode(request, staging, Envelope.LENGTH);
             }
             final int totalLen = Envelope.LENGTH + payloadLen;
-            if (totalLen > config.maxMessageSize()) {
-                throw new PayloadTooLargeException(totalLen, config.maxMessageSize());
+            if (totalLen > maxMessageSize) {
+                throw new PayloadTooLargeException(totalLen, maxMessageSize);
             }
             if (totalLen > staging.capacity()) {
                 throw new RpcException(
@@ -505,14 +745,69 @@ public final class RpcChannel implements AutoCloseable {
             publishBytes(staging, 0, totalLen, policy);
             // 3. Await reply.
             final boolean ok = waiter.await(call, timeoutNs);
-            if (!ok) throw new RpcTimeoutException(correlationId, timeoutNs);
-            if (call.isFailed()) throw call.failure();
-            return respCodec.decode(call.responseBuffer(), 0, call.responseLength());
+            if (!ok) {
+                final RpcTimeoutException timeout = new RpcTimeoutException(correlationId, timeoutNs);
+                if (callEventListeners) {
+                    notifyCallTimedOut(requestMessageTypeId, correlationId, timeoutNs);
+                }
+                throw timeout;
+            }
+            if (call.isFailed()) {
+                if (callEventListeners) {
+                    notifyCallFailed(requestMessageTypeId, correlationId, call.failure());
+                }
+                throw call.failure();
+            }
+            final Resp response = respCodec.decode(call.responseBuffer(), 0, call.responseLength());
+            if (callEventListeners) {
+                notifyCallSucceeded(requestMessageTypeId, correlationId);
+            }
+            return response;
         } finally {
             if (!call.isCompleted()) {
                 pendingRegistry.remove(correlationId);
             }
             pendingPool.release(call);
+        }
+    }
+
+    private void ensureProtocolHandshake(final long timeoutNs) {
+        if (!protocolHandshakeEnabled || protocolHandshakeComplete) {
+            return;
+        }
+        synchronized (handshakeLock) {
+            if (!protocolHandshakeEnabled || protocolHandshakeComplete) {
+                return;
+            }
+            notifyProtocolHandshakeStarted();
+            try {
+                final ProtocolInfo remote = callInternal(
+                        Envelope.RESERVED_PROTOCOL_HANDSHAKE,
+                        Envelope.RESERVED_PROTOCOL_HANDSHAKE,
+                        new ProtocolInfo(protocolVersion, protocolCapabilities),
+                        PROTOCOL_INFO_CODEC,
+                        PROTOCOL_INFO_CODEC,
+                        Math.min(timeoutNs, protocolHandshakeTimeoutNs),
+                        BackpressurePolicy.BLOCK,
+                        false,
+                        false);
+                if (remote.version() != protocolVersion) {
+                    throw new ProtocolMismatchException(
+                            "Protocol version mismatch: local=" + protocolVersion + ", remote=" + remote.version());
+                }
+                if ((remote.capabilities() & requiredRemoteCapabilities) != requiredRemoteCapabilities) {
+                    throw new ProtocolMismatchException(
+                            "Remote capabilities mismatch: required=" + requiredRemoteCapabilities
+                            + ", remote=" + remote.capabilities());
+                }
+                remoteProtocolVersion = remote.version();
+                remoteProtocolCapabilities = remote.capabilities();
+                protocolHandshakeComplete = true;
+                notifyProtocolHandshakeSucceeded(remote.version(), remote.capabilities());
+            } catch (final RpcException exception) {
+                notifyProtocolHandshakeFailed(exception);
+                throw exception;
+            }
         }
     }
 
@@ -533,9 +828,10 @@ public final class RpcChannel implements AutoCloseable {
             final int length,
             final BackpressurePolicy policy
     ) {
-        final long deadline = System.nanoTime() + config.offerTimeout().toNanos();
+        final long deadline = System.nanoTime() + offerTimeoutNs;
         final IdleStrategy idle = txIdleTl.get();
         idle.reset();
+        final ConcurrentPublication publication = currentPublication();
         final int maxPayload = publication.maxPayloadLength();
         if (length <= maxPayload) {
             // tryClaim fast-path
@@ -571,7 +867,7 @@ public final class RpcChannel implements AutoCloseable {
             final IdleStrategy idle
     ) {
         if (result == Publication.NOT_CONNECTED) {
-            if (config.reconnectStrategy() == ReconnectStrategy.WAIT_FOR_CONNECTION
+            if (reconnectStrategy != ReconnectStrategy.FAIL_FAST
                 && System.nanoTime() < deadline
                 && waitPublicationConnected(deadline, idle)) {
                 return;
@@ -626,7 +922,7 @@ public final class RpcChannel implements AutoCloseable {
         if (!running.get()) {
             return 0;
         }
-        return subscription.poll(rxAssembler, fragmentLimit);
+        return currentSubscription().poll(rxAssembler, fragmentLimit);
     }
 
     /**
@@ -668,7 +964,7 @@ public final class RpcChannel implements AutoCloseable {
         if (isConnected()) {
             return true;
         }
-        if (config.reconnectStrategy() == ReconnectStrategy.FAIL_FAST) {
+        if (reconnectStrategy == ReconnectStrategy.FAIL_FAST) {
             return false;
         }
         final long deadline = System.nanoTime() + timeoutNs;
@@ -677,6 +973,9 @@ public final class RpcChannel implements AutoCloseable {
         while (running.get() && System.nanoTime() < deadline) {
             if (isConnected()) {
                 return true;
+            }
+            if (recreateTransportOnDisconnect && !currentPublication().isConnected()) {
+                attemptTransportReconnect();
             }
             idle.idle();
         }
@@ -697,12 +996,52 @@ public final class RpcChannel implements AutoCloseable {
      */
     private boolean waitPublicationConnected(final long deadline, final IdleStrategy idle) {
         while (running.get() && System.nanoTime() < deadline) {
-            if (publication.isConnected()) {
+            if (currentPublication().isConnected()) {
                 return true;
+            }
+            if (recreateTransportOnDisconnect) {
+                attemptTransportReconnect();
             }
             idle.idle();
         }
-        return publication.isConnected();
+        return currentPublication().isConnected();
+    }
+
+    private void attemptTransportReconnect() {
+        if (!recreateTransportOnDisconnect || !running.get()) {
+            return;
+        }
+        notifyReconnectAttempt();
+        try {
+            recreateTransport();
+            notifyReconnectSucceeded();
+        } catch (final Throwable t) {
+            notifyReconnectFailed(t);
+        }
+    }
+
+    private void recreateTransport() {
+        synchronized (transportLock) {
+            if (!running.get()) {
+                return;
+            }
+            final Subscription oldSubscription = subscription;
+            final ConcurrentPublication oldPublication = publication;
+            final ConcurrentPublication newPublication = aeron.addPublication(outboundChannel, config.streamId());
+            final Subscription newSubscription = aeron.addSubscription(inboundChannel, config.streamId());
+            publication = newPublication;
+            subscription = newSubscription;
+            CloseHelper.closeAll(oldSubscription, oldPublication);
+            protocolHandshakeComplete = false;
+        }
+    }
+
+    private ConcurrentPublication currentPublication() {
+        return recreateTransportOnDisconnect ? publication : steadyPublication;
+    }
+
+    private Subscription currentSubscription() {
+        return recreateTransportOnDisconnect ? subscription : steadySubscription;
     }
 
     private void dispatch(
@@ -746,25 +1085,48 @@ public final class RpcChannel implements AutoCloseable {
             final int payloadOffset,
             final int payloadLen
     ) {
+        if (messageTypeId == Envelope.RESERVED_PROTOCOL_HANDSHAKE) {
+            respondToProtocolHandshake(correlationId);
+            return;
+        }
         final HandlerEntry entry = handlers.get(messageTypeId);
         if (entry == null) return;
+        if (draining) {
+            tryPublishDrainError(entry, correlationId);
+            return;
+        }
+        inFlightHandlers.incrementAndGet();
         if (directExecutor) {
             // Exec в rx-треде, без копирования и offload. Минимум latency.
-            invokeHandler(entry, messageTypeId, correlationId, buffer, payloadOffset, payloadLen);
+            try {
+                invokeHandler(entry, messageTypeId, correlationId, buffer, payloadOffset, payloadLen);
+            } finally {
+                inFlightHandlers.decrementAndGet();
+            }
             return;
         }
         // OFFLOAD: копируем payload (чтобы rx-буфер не пропал) и сабмитим.
         if (payloadLen > offloadCopyBufferSize) {
             // Защита: payload не влезает в offload-буфер. Exec inline
             // (потеряем latency rx но не сломаемся). В проде это worth warning.
-            invokeHandler(entry, messageTypeId, correlationId, buffer, payloadOffset, payloadLen);
+            try {
+                invokeHandler(entry, messageTypeId, correlationId, buffer, payloadOffset, payloadLen);
+            } finally {
+                inFlightHandlers.decrementAndGet();
+            }
             return;
         }
         final UnsafeBuffer copy = acquireCopy();
         copy.putBytes(0, buffer, payloadOffset, payloadLen);
         final OffloadTask task = offloadTaskPool.acquire();
         task.init(offloadBody, messageTypeId, correlationId, copy, payloadLen, entry, offloadTaskPool);
-        offloadExecutor.execute(task);
+        try {
+            offloadExecutor.execute(task);
+        } catch (final RuntimeException e) {
+            inFlightHandlers.decrementAndGet();
+            releaseCopy(copy);
+            throw e;
+        }
     }
 
     /**
@@ -780,6 +1142,7 @@ public final class RpcChannel implements AutoCloseable {
         try {
             invokeHandler((HandlerEntry) entryObj, messageTypeId, correlationId, copy, 0, length);
         } finally {
+            inFlightHandlers.decrementAndGet();
             releaseCopy(copy);
         }
     }
@@ -830,7 +1193,7 @@ public final class RpcChannel implements AutoCloseable {
         final int written = entry.handler.handle(buffer, payloadOffset, payloadLen, staging, responseOffset, responseCapacity);
         if (written <= 0) return;
         if (written > responseCapacity) {
-            throw new PayloadTooLargeException(Envelope.LENGTH + written, config.maxMessageSize());
+            throw new PayloadTooLargeException(Envelope.LENGTH + written, maxMessageSize);
         }
         EnvelopeCodec.encode(staging, 0, entry.responseMessageTypeId, correlationId, 0, written);
         publishBytes(staging, 0, Envelope.LENGTH + written, BackpressurePolicy.BLOCK);
@@ -869,8 +1232,8 @@ public final class RpcChannel implements AutoCloseable {
             respLen = entry.respCodec.encode(resp, staging, Envelope.LENGTH);
         }
         final int totalLen = Envelope.LENGTH + respLen;
-        if (totalLen > config.maxMessageSize()) {
-            throw new PayloadTooLargeException(totalLen, config.maxMessageSize());
+        if (totalLen > maxMessageSize) {
+            throw new PayloadTooLargeException(totalLen, maxMessageSize);
         }
         EnvelopeCodec.encode(staging, 0, entry.responseMessageTypeId, correlationId, 0, respLen);
         publishBytes(staging, 0, totalLen, BackpressurePolicy.BLOCK);
@@ -904,7 +1267,9 @@ public final class RpcChannel implements AutoCloseable {
             return;
         }
         if (EnvelopeCodec.isError(flags)) {
-            call.completeFail(decodeRemoteError(buffer, payloadOffset, payloadLen));
+            final RemoteRpcException error = decodeRemoteError(buffer, payloadOffset, payloadLen);
+            notifyRemoteError(messageTypeId, correlationId, error);
+            call.completeFail(error);
             return;
         }
         call.completeOk(buffer, payloadOffset, payloadLen);
@@ -939,6 +1304,7 @@ public final class RpcChannel implements AutoCloseable {
      */
     private void onChannelDown() {
         LOGGER.warning("RPC channel DOWN -> failfast " + pendingRegistry.size() + " pending");
+        notifyChannelDown();
         pendingRegistry.forEachAndClear(pc -> {
             pc.completeFail("channel DOWN (heartbeat missed)");
             pendingPool.release(pc);
@@ -951,6 +1317,7 @@ public final class RpcChannel implements AutoCloseable {
      */
     private void onChannelUp() {
         LOGGER.info("RPC channel UP");
+        notifyChannelUp();
     }
 
     /**
@@ -978,10 +1345,10 @@ public final class RpcChannel implements AutoCloseable {
      */
     private UnsafeBuffer ensureMaxSizedTxStaging() {
         UnsafeBuffer staging = txStaging.get();
-        if (staging.capacity() >= config.maxMessageSize()) {
+        if (staging.capacity() >= maxMessageSize) {
             return staging;
         }
-        staging = new UnsafeBuffer(ByteBuffer.allocateDirect(config.maxMessageSize()));
+        staging = new UnsafeBuffer(ByteBuffer.allocateDirect(maxMessageSize));
         txStaging.set(staging);
         return staging;
     }
@@ -1055,6 +1422,193 @@ public final class RpcChannel implements AutoCloseable {
         return new RemoteRpcException(statusCode, message.isEmpty() ? "remote error" : message);
     }
 
+    private void respondToProtocolHandshake(final long correlationId) {
+        final UnsafeBuffer staging = txStaging.get();
+        final int payloadLen = PROTOCOL_INFO_CODEC.encode(
+                new ProtocolInfo(protocolVersion, protocolCapabilities),
+                staging,
+                Envelope.LENGTH);
+        EnvelopeCodec.encode(staging, 0, Envelope.RESERVED_PROTOCOL_HANDSHAKE, correlationId, 0, payloadLen);
+        publishBytes(staging, 0, Envelope.LENGTH + payloadLen, BackpressurePolicy.BLOCK);
+    }
+
+    private void tryPublishDrainError(final HandlerEntry entry, final long correlationId) {
+        try {
+            final UnsafeBuffer staging = txStaging.get();
+            final RpcApplicationException error = new RpcApplicationException(RpcStatus.SERVICE_UNAVAILABLE, "channel is draining");
+            final int payloadLen = encodeRemoteError(staging, Envelope.LENGTH, error);
+            EnvelopeCodec.encode(staging, 0, responseMessageTypeId(entry), correlationId, Envelope.FLAG_IS_ERROR, payloadLen);
+            publishBytes(staging, 0, Envelope.LENGTH + payloadLen, BackpressurePolicy.BLOCK);
+        } catch (final Throwable t) {
+            LOGGER.log(Level.FINE, "failed to publish drain error", t);
+        }
+    }
+
+    private void notifyCallStarted(final int requestMessageTypeId, final long correlationId) {
+        if (!callEventListeners) return;
+        if (singleListener != null) {
+            singleListener.onCallStarted(this, requestMessageTypeId, correlationId);
+            return;
+        }
+        for (final RpcChannelListener listener : listeners) {
+            listener.onCallStarted(this, requestMessageTypeId, correlationId);
+        }
+    }
+
+    private void notifyCallSucceeded(final int requestMessageTypeId, final long correlationId) {
+        if (!callEventListeners) return;
+        if (singleListener != null) {
+            singleListener.onCallSucceeded(this, requestMessageTypeId, correlationId);
+            return;
+        }
+        for (final RpcChannelListener listener : listeners) {
+            listener.onCallSucceeded(this, requestMessageTypeId, correlationId);
+        }
+    }
+
+    private void notifyCallTimedOut(final int requestMessageTypeId, final long correlationId, final long timeoutNs) {
+        if (!callEventListeners) return;
+        if (singleListener != null) {
+            singleListener.onCallTimedOut(this, requestMessageTypeId, correlationId, timeoutNs);
+            return;
+        }
+        for (final RpcChannelListener listener : listeners) {
+            listener.onCallTimedOut(this, requestMessageTypeId, correlationId, timeoutNs);
+        }
+    }
+
+    private void notifyCallFailed(final int requestMessageTypeId, final long correlationId, final RpcException failure) {
+        if (!callEventListeners) return;
+        if (singleListener != null) {
+            singleListener.onCallFailed(this, requestMessageTypeId, correlationId, failure);
+            return;
+        }
+        for (final RpcChannelListener listener : listeners) {
+            listener.onCallFailed(this, requestMessageTypeId, correlationId, failure);
+        }
+    }
+
+    private void notifyRemoteError(final int responseMessageTypeId, final long correlationId, final RpcException failure) {
+        if (!remoteErrorListeners) return;
+        if (singleListener != null) {
+            singleListener.onRemoteError(this, responseMessageTypeId, correlationId, failure);
+            return;
+        }
+        for (final RpcChannelListener listener : listeners) {
+            listener.onRemoteError(this, responseMessageTypeId, correlationId, failure);
+        }
+    }
+
+    private void notifyChannelUp() {
+        if (!channelStateListeners) return;
+        if (singleListener != null) {
+            singleListener.onChannelUp(this);
+            return;
+        }
+        for (final RpcChannelListener listener : listeners) {
+            listener.onChannelUp(this);
+        }
+    }
+
+    private void notifyChannelDown() {
+        if (!channelStateListeners) return;
+        if (singleListener != null) {
+            singleListener.onChannelDown(this);
+            return;
+        }
+        for (final RpcChannelListener listener : listeners) {
+            listener.onChannelDown(this);
+        }
+    }
+
+    private void notifyDrainStarted() {
+        if (!drainStateListeners) return;
+        if (singleListener != null) {
+            singleListener.onDrainStarted(this);
+            return;
+        }
+        for (final RpcChannelListener listener : listeners) {
+            listener.onDrainStarted(this);
+        }
+    }
+
+    private void notifyDrainFinished() {
+        if (!drainStateListeners) return;
+        if (singleListener != null) {
+            singleListener.onDrainFinished(this);
+            return;
+        }
+        for (final RpcChannelListener listener : listeners) {
+            listener.onDrainFinished(this);
+        }
+    }
+
+    private void notifyReconnectAttempt() {
+        if (!reconnectStateListeners) return;
+        if (singleListener != null) {
+            singleListener.onReconnectAttempt(this, reconnectStrategy);
+            return;
+        }
+        for (final RpcChannelListener listener : listeners) {
+            listener.onReconnectAttempt(this, reconnectStrategy);
+        }
+    }
+
+    private void notifyReconnectSucceeded() {
+        if (!reconnectStateListeners) return;
+        if (singleListener != null) {
+            singleListener.onReconnectSucceeded(this, reconnectStrategy);
+            return;
+        }
+        for (final RpcChannelListener listener : listeners) {
+            listener.onReconnectSucceeded(this, reconnectStrategy);
+        }
+    }
+
+    private void notifyReconnectFailed(final Throwable failure) {
+        if (!reconnectStateListeners) return;
+        if (singleListener != null) {
+            singleListener.onReconnectFailed(this, reconnectStrategy, failure);
+            return;
+        }
+        for (final RpcChannelListener listener : listeners) {
+            listener.onReconnectFailed(this, reconnectStrategy, failure);
+        }
+    }
+
+    private void notifyProtocolHandshakeStarted() {
+        if (!protocolHandshakeListeners) return;
+        if (singleListener != null) {
+            singleListener.onProtocolHandshakeStarted(this);
+            return;
+        }
+        for (final RpcChannelListener listener : listeners) {
+            listener.onProtocolHandshakeStarted(this);
+        }
+    }
+
+    private void notifyProtocolHandshakeSucceeded(final int remoteVersion, final long remoteCapabilities) {
+        if (!protocolHandshakeListeners) return;
+        if (singleListener != null) {
+            singleListener.onProtocolHandshakeSucceeded(this, remoteVersion, remoteCapabilities);
+            return;
+        }
+        for (final RpcChannelListener listener : listeners) {
+            listener.onProtocolHandshakeSucceeded(this, remoteVersion, remoteCapabilities);
+        }
+    }
+
+    private void notifyProtocolHandshakeFailed(final RpcException failure) {
+        if (!protocolHandshakeListeners) return;
+        if (singleListener != null) {
+            singleListener.onProtocolHandshakeFailed(this, failure);
+            return;
+        }
+        for (final RpcChannelListener listener : listeners) {
+            listener.onProtocolHandshakeFailed(this, failure);
+        }
+    }
+
     /**
      * Validates that the message type id is in the user-reserved range.
      *
@@ -1063,6 +1617,31 @@ public final class RpcChannel implements AutoCloseable {
     private void validateUserMessageTypeId(final int id) {
         if (id < MIN_USER_MESSAGE_TYPE_ID)
             throw new IllegalArgumentException("messageTypeId must be >= " + MIN_USER_MESSAGE_TYPE_ID + " (got " + id + ")");
+    }
+
+    private boolean hasListenerOverride(final String methodName, final Class<?>... parameterTypes) {
+        if (!hasListeners) {
+            return false;
+        }
+        for (final RpcChannelListener listener : listeners) {
+            try {
+                if (listener.getClass()
+                            .getMethod(methodName, prependChannelParameter(parameterTypes))
+                            .getDeclaringClass() != RpcChannelListener.class) {
+                    return true;
+                }
+            } catch (final NoSuchMethodException e) {
+                throw new IllegalStateException("Listener method lookup failed: " + methodName, e);
+            }
+        }
+        return false;
+    }
+
+    private static Class<?>[] prependChannelParameter(final Class<?>[] parameterTypes) {
+        final Class<?>[] signature = new Class<?>[parameterTypes.length + 1];
+        signature[0] = RpcChannel.class;
+        System.arraycopy(parameterTypes, 0, signature, 1, parameterTypes.length);
+        return signature;
     }
 
     /**

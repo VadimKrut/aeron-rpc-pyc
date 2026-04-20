@@ -97,6 +97,66 @@ public enum RpcStatus {
     }
 
     /**
+     * Returns whether the status belongs to the 1xx informational range.
+     *
+     * @return {@code true} for informational statuses
+     */
+    public boolean isInformational() {
+        return code >= 100 && code < 200;
+    }
+
+    /**
+     * Returns whether the status belongs to the 2xx success range.
+     *
+     * @return {@code true} for success statuses
+     */
+    public boolean isSuccess() {
+        return code >= 200 && code < 300;
+    }
+
+    /**
+     * Returns whether the status belongs to the 3xx redirection range.
+     *
+     * @return {@code true} for redirect-like statuses
+     */
+    public boolean isRedirect() {
+        return code >= 300 && code < 400;
+    }
+
+    /**
+     * Returns whether the status belongs to the 4xx client-error range.
+     *
+     * @return {@code true} for client errors
+     */
+    public boolean isClientError() {
+        return code >= 400 && code < 500;
+    }
+
+    /**
+     * Returns whether the status belongs to the 5xx server-error range.
+     *
+     * @return {@code true} for server errors
+     */
+    public boolean isServerError() {
+        return code >= 500 && code < 600;
+    }
+
+    /**
+     * Returns whether the status is commonly retryable for transport callers.
+     *
+     * @return {@code true} for statuses that can reasonably be retried
+     */
+    public boolean isRetryable() {
+        return this == REQUEST_TIMEOUT
+               || this == TOO_EARLY
+               || this == TOO_MANY_REQUESTS
+               || this == BAD_GATEWAY
+               || this == SERVICE_UNAVAILABLE
+               || this == GATEWAY_TIMEOUT
+               || this == INSUFFICIENT_STORAGE;
+    }
+
+    /**
      * Resolves a numeric code into a known status when possible.
      *
      * @param code numeric status code

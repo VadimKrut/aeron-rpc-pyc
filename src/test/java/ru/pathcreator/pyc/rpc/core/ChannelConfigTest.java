@@ -28,8 +28,14 @@ class ChannelConfigTest {
         assertEquals(ChannelConfig.DEFAULT_MAX_MESSAGE_SIZE, config.maxMessageSize());
         assertEquals(BackpressurePolicy.BLOCK, config.backpressurePolicy());
         assertEquals(ReconnectStrategy.FAIL_FAST, config.reconnectStrategy());
+        assertFalse(config.protocolHandshakeEnabled());
+        assertEquals(1, config.protocolVersion());
+        assertEquals(0L, config.protocolCapabilities());
+        assertEquals(0L, config.requiredRemoteCapabilities());
+        assertEquals(Duration.ofSeconds(1), config.protocolHandshakeTimeout());
         assertEquals(IdleStrategyKind.YIELDING, config.rxIdleStrategy());
         assertFalse(config.isDirectExecutor());
+        assertEquals(0, config.listeners().length);
     }
 
     @Test
@@ -53,6 +59,32 @@ class ChannelConfigTest {
                 .build();
 
         assertEquals(ReconnectStrategy.WAIT_FOR_CONNECTION, config.reconnectStrategy());
+    }
+
+    @Test
+    void canConfigureProtocolHandshakeAndListeners() {
+        final RpcChannelListener listener = new RpcChannelListener() {
+        };
+        final ChannelConfig config = ChannelConfig.builder()
+                .localEndpoint("localhost:40101")
+                .remoteEndpoint("localhost:40102")
+                .reconnectStrategy(ReconnectStrategy.RECREATE_ON_DISCONNECT)
+                .protocolHandshakeEnabled(true)
+                .protocolVersion(7)
+                .protocolCapabilities(0b101L)
+                .requiredRemoteCapabilities(0b001L)
+                .protocolHandshakeTimeout(Duration.ofMillis(250))
+                .listener(listener)
+                .build();
+
+        assertEquals(ReconnectStrategy.RECREATE_ON_DISCONNECT, config.reconnectStrategy());
+        assertTrue(config.protocolHandshakeEnabled());
+        assertEquals(7, config.protocolVersion());
+        assertEquals(0b101L, config.protocolCapabilities());
+        assertEquals(0b001L, config.requiredRemoteCapabilities());
+        assertEquals(Duration.ofMillis(250), config.protocolHandshakeTimeout());
+        assertEquals(1, config.listeners().length);
+        assertSame(listener, config.listeners()[0]);
     }
 
     @Test
@@ -87,5 +119,19 @@ class ChannelConfigTest {
                 .build());
 
         assertEquals("maxMessageSize > 16 MiB not supported by RpcChannel.", exception.getMessage());
+    }
+
+    @Test
+    void rejectsInvalidProtocolHandshakeConfig() {
+        assertThrows(IllegalArgumentException.class, () -> ChannelConfig.builder()
+                .localEndpoint("localhost:40101")
+                .remoteEndpoint("localhost:40102")
+                .protocolVersion(0)
+                .build());
+        assertThrows(IllegalArgumentException.class, () -> ChannelConfig.builder()
+                .localEndpoint("localhost:40101")
+                .remoteEndpoint("localhost:40102")
+                .protocolHandshakeTimeout(Duration.ZERO)
+                .build());
     }
 }

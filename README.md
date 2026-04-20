@@ -2,17 +2,18 @@
 
 Synchronous request/response RPC over Aeron UDP for low-latency Java systems.
 
-The library keeps a blocking `call()` API while the transport path is tuned for:
+`rpc-core` keeps a blocking `call()` API while the transport stays focused on:
 
 - low transport overhead
-- minimal allocations on the hot path
-- predictable latency for request/response workloads
+- minimal hot-path allocations
+- predictable request/response latency
 - safe concurrent callers
+- many-channel layouts on one driver
 
 ## Why
 
-Many low-latency transports push users into async/reactive code even when the business flow is naturally
-request/response.
+Many low-latency transports push users toward async or reactive code even when
+the business flow is naturally request/response.
 
 `rpc-core` is for the opposite case:
 
@@ -23,20 +24,21 @@ request/response.
 ## Good Fit
 
 - internal low-latency services
-- trading / fintech / market-data style systems
+- trading, fintech, and market-data style systems
 - request/response flows on controlled networks
-- systems where user code is easier to reason about synchronously
+- services where synchronous business code is simpler and safer
 
-## Not a Good Fit
+## Not A Good Fit
 
-- large payload transfer as the main workload
+- very large file transfer as the main workload
+- internet-facing RPC without an external security layer
+- systems that need built-in streaming, auth, or schema negotiation by default
 
 ## Installation
 
 ### Maven via GitVerse
 
 ```xml
-
 <repositories>
     <repository>
         <id>gitverse</id>
@@ -45,21 +47,20 @@ request/response.
 </repositories>
 
 <dependencies>
-<dependency>
-    <groupId>ru.pathcreator.pyc</groupId>
-    <artifactId>rpc-core</artifactId>
-    <version>0.0.8</version>
-</dependency>
+    <dependency>
+        <groupId>ru.pathcreator.pyc</groupId>
+        <artifactId>rpc-core</artifactId>
+        <version>0.0.9</version>
+    </dependency>
 </dependencies>
 ```
 
 ### Maven via GitHub Packages
 
-GitHub Packages requires authentication even for reads. Add a token with `read:packages` to Maven `settings.xml`, then
-configure:
+GitHub Packages requires authentication even for reads. Add a token with
+`read:packages` to Maven `settings.xml`, then configure:
 
 ```xml
-
 <repositories>
     <repository>
         <id>github</id>
@@ -71,11 +72,11 @@ configure:
 </repositories>
 
 <dependencies>
-<dependency>
-    <groupId>ru.pathcreator.pyc</groupId>
-    <artifactId>rpc-core</artifactId>
-    <version>0.0.8</version>
-</dependency>
+    <dependency>
+        <groupId>ru.pathcreator.pyc</groupId>
+        <artifactId>rpc-core</artifactId>
+        <version>0.0.9</version>
+    </dependency>
 </dependencies>
 ```
 
@@ -91,7 +92,7 @@ configure:
 ```java
 RpcNode node = RpcNode.start(
         NodeConfig.builder()
-                .aeronDir("/tmp/aeron")
+                .aeronDir("/tmp/rpc-core")
                 .build()
 );
 ```
@@ -101,8 +102,8 @@ RpcNode node = RpcNode.start(
 ```java
 RpcChannel channel = node.channel(
         ChannelConfig.builder()
-                .localEndpoint("0.0.0.0:40101")
-                .remoteEndpoint("localhost:40102")
+                .localEndpoint("127.0.0.1:40101")
+                .remoteEndpoint("127.0.0.1:40102")
                 .streamId(1001)
                 .build()
 );
@@ -113,16 +114,11 @@ RpcChannel channel = node.channel(
 ```java
 channel.onRequest(
         1,
-                2,
-                new MyRequestCodec(),
-        new
-
-MyResponseCodec(),
-
-req ->new
-
-MyResponse(req.id())
-        );
+        2,
+        new MyRequestCodec(),
+        new MyResponseCodec(),
+        request -> new MyResponse(request.id())
+);
 ```
 
 ### Start and call
@@ -139,10 +135,6 @@ MyResponse response = channel.call(
 );
 ```
 
-For full Java integration examples, including production-style configuration,
-reconnect handling, many-channel layouts, and a complete settings reference, see
-[`docs/JAVA_EXAMPLES.md`](docs/JAVA_EXAMPLES.md).
-
 ## Core Concepts
 
 ### `RpcNode`
@@ -150,7 +142,7 @@ reconnect handling, many-channel layouts, and a complete settings reference, see
 `RpcNode` owns:
 
 - the Aeron client
-- optional embedded `MediaDriver`
+- the optional embedded `MediaDriver`
 - the shared offload executor
 - the shared receive poller
 - all channels created through that node
@@ -161,16 +153,16 @@ reconnect handling, many-channel layouts, and a complete settings reference, see
 
 - one `Publication`
 - one `Subscription`
-- its own pending-call registry
-- its own correlation flow
-- its own handler registry
+- one pending-call registry
+- one correlation flow
+- one handler registry
 
-Multiple caller threads are safe. Responses are matched by correlation id, so one caller cannot receive another caller's
-response.
+Multiple caller threads are safe. Responses are matched by correlation id, so
+one caller cannot receive another caller's response.
 
 ### `MessageCodec`
 
-`MessageCodec<T>` is the user serialization layer.
+`MessageCodec<T>` is the user-controlled serialization layer.
 
 ```java
 interface MessageCodec<T> {
@@ -182,158 +174,102 @@ interface MessageCodec<T> {
 
 ### `RawRequestHandler`
 
-`RawRequestHandler` is the low-level server path: raw request bytes in, raw response bytes out.
+`RawRequestHandler` is the low-level server path: raw request bytes in, raw
+response bytes out.
 
 Use it when you want tight control over allocations and serialization.
 
-### Remote errors
+## Remote Errors
 
 Unhandled server-side failures are returned as structured remote errors instead
 of silently turning into client-side timeouts.
 
-The transport uses HTTP-like status codes for built-in failures:
-
-- `400` bad request
-- `413` payload too large
-- `500` internal server error
-- `501` not implemented
-- `503` service unavailable
-
-Application handlers can return their own business error codes by throwing
+Built-in transport and shared validation failures use HTTP-like status codes.
+Application code can return business-level errors by throwing
 `RpcApplicationException`, preferably with custom codes `>= 1000`.
+
+## Performance Model
+
+The core transport path is designed to stay ultra-fast by default. Newer
+service-level features such as listeners, protocol handshake, and reconnect
+recreation are optional and should only be enabled when you need them.
+
+After the recent steady-state benchmark cleanup:
+
+- disabled optional features keep the default path near the earlier baseline
+- enabled optional features are now close to noise in steady-state on our clean
+  WSL runs
+- first-contact handshake cost is intentionally excluded from steady-state
+  benchmarking and should be treated as startup/session work, not per-call work
+
+For the latest measured numbers and commands, see
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
 ## Current Transport Architecture
 
-Recent changes introduced a shared receive-poller design.
+`rpc-core` uses a shared receive-poller design.
 
-Instead of forcing one hot RX thread per channel, `RpcNode` can host a shared receive poller with multiple lanes. Each
-`RpcChannel` stays logically isolated, but receive polling can be shared across many channels on the same driver.
+Instead of forcing one hot RX thread per channel, `RpcNode` can host a shared
+receive poller with multiple lanes. Each `RpcChannel` stays logically isolated,
+but receive polling can be shared across many channels on the same driver.
 
 Important properties:
 
-- channels still keep isolated pending state
+- channels keep isolated pending state
 - correlation safety is unchanged
 - one `Subscription` is never polled concurrently by multiple threads
-- empty RX lanes now park instead of burning CPU
+- empty RX lanes park instead of burning CPU
 
 This matters especially for workloads with many channels on one `MediaDriver`.
 
-## Main Tuning Knobs
+## Recommended Starting Point
 
-### Handler execution
+For practical low-latency services with real handler work:
 
-| Setting                                           | Runs where               | Use when                              |
-|---------------------------------------------------|--------------------------|---------------------------------------|
-| default                                           | node default executor    | normal blocking or I/O-heavy handlers |
-| `.offloadExecutor(myPool)`                        | your executor            | custom scheduling / CPU-heavy work    |
-| `.offloadExecutor(ChannelConfig.DIRECT_EXECUTOR)` | directly in receive path | only for extremely fast handlers      |
+- `OFFLOAD` handlers
+- `YIELDING` receive idle strategy
+- shared receive poller enabled
+- `sharedReceivePollerThreads(2)` as the first measurement point
+- `ReconnectStrategy.WAIT_FOR_CONNECTION` when brief disconnects should be
+  tolerated
 
-`DIRECT_EXECUTOR` removes offload scheduling and payload copy, but a slow handler blocks receive progress.
+For deeper tuning guidance, see
+[`docs/CHANNEL_TUNING.md`](docs/CHANNEL_TUNING.md).
 
-### RX idle strategy
+## More Documentation
 
-| Strategy    | Use when                                        |
-|-------------|-------------------------------------------------|
-| `YIELDING`  | low-latency default                             |
-| `BUSY_SPIN` | you are willing to burn a core for the hot path |
-| `BACKOFF`   | mostly idle channels and CPU-sensitive hosts    |
-
-### Reconnect strategy
-
-`ChannelConfig` now supports:
-
-- `ReconnectStrategy.FAIL_FAST` - old behavior, fail immediately if disconnected
-- `ReconnectStrategy.WAIT_FOR_CONNECTION` - wait until the existing publication/heartbeat becomes connected again
-
-This does not recreate channels automatically. It only waits for the current Aeron path to come back before sending the
-request.
-
-Example:
-
-```java
-ChannelConfig.builder()
-        .
-
-localEndpoint("localhost:40101")
-        .
-
-remoteEndpoint("localhost:40102")
-        .
-
-streamId(1001)
-        .
-
-reconnectStrategy(ReconnectStrategy.WAIT_FOR_CONNECTION)
-        .
-
-build();
-```
-
-### Shared receive poller
-
-`NodeConfig` now supports:
-
-- `sharedReceivePoller(boolean)`
-- `sharedReceivePollerThreads(int)`
-- `sharedReceivePollerFragmentLimit(int)`
-
-Example:
-
-```java
-RpcNode node = RpcNode.start(
-        NodeConfig.builder()
-                .aeronDir("/tmp/aeron")
-                .sharedReceivePoller(true)
-                .sharedReceivePollerThreads(2)
-                .sharedReceivePollerFragmentLimit(16)
-                .build()
-);
-```
-
-For many channels on one host, this is often better than spinning one dedicated RX thread per channel.
+- [`docs/JAVA_EXAMPLES.md`](docs/JAVA_EXAMPLES.md) - copy-paste Java setup and
+  integration examples
+- [`docs/CHANNEL_TUNING.md`](docs/CHANNEL_TUNING.md) - what the important node
+  and channel settings do, when to use them, and what they can cost
+- [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) - benchmark commands, methodology,
+  and current benchmark notes
 
 ## Testing
 
-Run unit tests:
+Run unit and integration-style correctness tests:
 
 ```bash
 mvn test
 ```
 
-Notable coverage now includes:
+Run benchmark packaging:
 
-- concurrent correlation correctness
-- IO-like offloaded handlers across multiple channels and threads
-- reconnect wait strategy
-
-## Benchmarks
-
-The old benchmark section in this README was replaced with the current standalone latency workflow.
-
-See:
-
-- [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)
-- [`docs/JAVA_EXAMPLES.md`](docs/JAVA_EXAMPLES.md)
-
-That document contains:
-
-- current benchmark commands
-- parameter explanations
-- `OFFLOAD + YIELDING` examples
-- multi-channel and multi-thread scenarios
-- IO-like handler scenarios
-- Java integration examples for application code
-- notes about comparison with raw Aeron
+```bash
+mvn -Pbenchmarks -DskipTests package
+```
 
 ## Limitations
 
-- no automatic channel recreation
+- no full automatic channel recreation by default
 - regular `RpcChannel` supports a single message up to 16 MiB total size
-- the usable payload is slightly smaller than 16 MiB because protocol envelope bytes are included in that limit
-- payloads or files larger than a single 16 MiB message should use application-level chunking or a separate transport
-  path
+- the usable payload is slightly smaller than 16 MiB because protocol envelope
+  bytes are included in that limit
+- payloads or files larger than a single 16 MiB message should use
+  application-level chunking or a separate transport path
 - `DIRECT_EXECUTOR` can block receive progress
-- auth, encryption, and authorization belong to the application or infrastructure layer
+- auth, encryption, and authorization belong to the application or
+  infrastructure layer
 
 ## License
 

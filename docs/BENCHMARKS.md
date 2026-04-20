@@ -1,11 +1,12 @@
 # Benchmarks
 
-This project currently has two benchmark layers:
+This project has two benchmark layers:
 
-- JMH microbenchmarks for low-level transport/code-path exploration
-- a standalone latency benchmark for realistic synchronous request/response RTT
+- JMH microbenchmarks for narrow code-path exploration
+- a standalone RTT benchmark for real synchronous `RpcChannel.call(...)`
 
-If you care about real `RpcChannel.call(...)` behavior, use the standalone latency benchmark first.
+If you care about production-facing request/response behavior, start with the
+standalone RTT benchmark.
 
 ## Build
 
@@ -13,7 +14,7 @@ If you care about real `RpcChannel.call(...)` behavior, use the standalone laten
 mvn -Pbenchmarks -DskipTests package
 ```
 
-The benchmark jar will be written to:
+The benchmark jar is written to:
 
 ```text
 target/rpc-core-benchmarks.jar
@@ -25,7 +26,7 @@ On Java 25, run benchmarks with:
 --add-exports java.base/jdk.internal.misc=ALL-UNNAMED
 ```
 
-## Standalone Latency Benchmark
+## Standalone RTT Benchmark
 
 Main class:
 
@@ -36,7 +37,7 @@ ru.pathcreator.pyc.rpc.core.bench.RpcLatencyHistogramMain
 This benchmark measures the full synchronous round trip:
 
 1. caller encodes request
-2. request is published through `RpcChannel`
+2. request is published
 3. server handler runs
 4. response is published back
 5. caller receives and decodes response
@@ -48,7 +49,7 @@ It is closed-loop: one in-flight request per caller thread.
 | Parameter                    | Meaning                                                 |
 |------------------------------|---------------------------------------------------------|
 | `--payload`                  | request and response payload size in bytes              |
-| `--rate`                     | target total request rate across all caller threads     |
+| `--rate`                     | target total request rate across caller threads         |
 | `--threads`                  | caller thread count                                     |
 | `--channels`                 | number of client/server channel pairs                   |
 | `--rx-poller-threads`        | number of shared RX poller lanes per idle-strategy kind |
@@ -58,10 +59,30 @@ It is closed-loop: one in-flight request per caller thread.
 | `--idle`                     | `YIELDING`, `BUSY_SPIN`, or `BACKOFF`                   |
 | `--handler-io-nanos`         | artificial delay inside the server handler              |
 | `--handler-io-micros`        | same as above, in microseconds                          |
+| `--listeners`                | enable channel listeners during the run                 |
+| `--protocol-handshake`       | enable protocol handshake                               |
+| `--reconnect`                | reconnect mode, including `RECREATE_ON_DISCONNECT`      |
+
+## Benchmark Methodology Notes
+
+For meaningful comparisons:
+
+- run one scenario at a time
+- keep the machine state as stable as possible
+- compare runs on the same OS and host layout
+- do not mix Windows and WSL numbers as if they were the same environment
+
+Important note for `--protocol-handshake`:
+
+- the benchmark now primes the handshake before the timed phase
+- that means steady-state RTT numbers exclude the one-time first-contact
+  handshake cost
+- this is intentional, because handshake is a startup or session concern, not a
+  per-call concern
 
 ## Recommended Starting Point
 
-For blocking or I/O-like handlers:
+For practical low-latency services with real handler work:
 
 ```bash
 java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
@@ -83,9 +104,9 @@ java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
 
 Why this profile:
 
-- `OFFLOAD` keeps user I/O off the receive path
+- `OFFLOAD` keeps user work off the receive path
 - `YIELDING` is the most practical low-latency default
-- `burst-size=1` makes the test easier to compare with request/response RTT
+- `burst-size=1` makes RTT comparison cleaner
 
 ## Useful Scenarios
 
@@ -109,9 +130,9 @@ java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
   --idle=YIELDING
 ```
 
-Use this to understand transport overhead without caller contention.
+Use this to understand transport overhead with almost no caller contention.
 
-### 2. Many threads on one channel
+### 2. Several caller threads on one channel
 
 ```bash
 java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
@@ -131,7 +152,7 @@ java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
   --idle=YIELDING
 ```
 
-This is the "many callers compete for one `ConcurrentPublication`" scenario.
+This shows contention on one publication and one channel path.
 
 ### 3. Many channels on one driver
 
@@ -153,7 +174,8 @@ java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
   --idle=YIELDING
 ```
 
-This is the most relevant scenario if users will create many `RpcChannel`s on one `MediaDriver`.
+This is the most relevant layout when many `RpcChannel`s share one
+`MediaDriver`.
 
 ### 4. IO-like handler simulation
 
@@ -176,64 +198,86 @@ java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
   --idle=YIELDING
 ```
 
-This is useful when your real server handlers do database, HTTP, filesystem, or other blocking work.
+Useful when real handlers will do database, filesystem, or network I/O.
 
-## How to Read the Results
+## How To Read Results
 
 Focus on:
 
-- `p50`: normal-case transport behavior
-- `p90`: practical latency under load
-- `p99` and `p99.9`: tail sensitivity
-- `Achieved rate`: whether the system actually keeps up with the requested rate
+- `p50` for normal-case transport cost
+- `p90` for practical latency under load
+- `p99` and `p99.9` for tail sensitivity
+- `Achieved rate` for whether the system actually holds the target rate
 
-For synchronous RPC, `p90` and `p99` are usually more useful than just mean latency.
+For synchronous RPC, `p90` and `p99` are usually more useful than mean latency.
 
-## Practical Observations From Current WSL Runs
+## Current Feature-Cost Snapshot
 
-These are example observations from local WSL measurements with `OFFLOAD + YIELDING`, `payload=32`, `burst=1`.
+The most useful recent comparison was a clean sequential WSL run with:
+
+- `payload=32`
+- `threads=4`
+- `channels=2`
+- `handler=OFFLOAD`
+- `idle=YIELDING`
+- `rx-poller-threads=4`
+
+Baseline:
+
+| Mode     |       p50 |       p90 |        p99 |      p99.9 | Achieved rate |
+|----------|----------:|----------:|-----------:|-----------:|--------------:|
+| baseline | 26.527 us | 55.359 us | 116.287 us | 277.759 us | 115,474 ops/s |
+
+Optional features measured against that baseline:
+
+| Mode                               |       p50 |       p90 |        p99 |      p99.9 | Achieved rate | Practical read                    |
+|------------------------------------|----------:|----------:|-----------:|-----------:|--------------:|-----------------------------------|
+| `listeners=true`                   | 25.647 us | 56.415 us | 119.743 us | 267.263 us | 116,246 ops/s | effectively noise in steady-state |
+| `protocol-handshake=true`          | 26.399 us | 55.903 us | 112.831 us | 293.119 us | 115,177 ops/s | steady-state cost close to noise  |
+| `reconnect=RECREATE_ON_DISCONNECT` | 25.023 us | 55.295 us | 113.023 us | 270.079 us | 120,300 ops/s | steady-state cost close to noise  |
+
+What this means:
+
+- optional service features no longer dominate the hot path in steady-state
+- the meaningful handshake cost is still the first-contact/session event, not
+  the steady-state call path
+- if you want the leanest possible profile, you can still keep these features
+  off
+
+## Practical Observations
 
 ### 1 channel / 1 thread
 
-- `p50 ~ 6 us`
-- `p90 ~ 16 us`
-- achieved rate close to target `100k`
+This is the clean reference for transport overhead.
 
-This is the right reference for "pure" transport overhead.
+On healthy local runs, this profile should stay close to the lowest numbers in
+your environment.
 
-### 1 channel / 8 threads
+### Many threads on one channel
 
-- latency rises sharply
-- throughput does not scale linearly
+Latency rises faster and throughput usually stops scaling linearly.
 
-This is expected: multiple caller threads contend on one `ConcurrentPublication` and one channel path.
+This is expected because callers contend on one channel path.
 
-### 2-4 channels / 8 threads
+### Several channels on one driver
 
-- usually much better than 1 channel / 8 threads
-- throughput stays close to the `150k` target
+Usually better than forcing all callers through one channel.
 
-This is the sweet spot for "more independent channels on one driver".
+This is often the better scaling direction in real systems.
 
-### 8 channels / 8 threads
+### RX poller count
 
-The result depends strongly on `--rx-poller-threads`.
+`--rx-poller-threads` is always machine-dependent.
 
-In our recent WSL runs:
+Too few poller lanes can under-serve many channels. Too many can start
+competing with caller threads, offload work, and the media driver.
 
-- `rx-poller-threads=2` was better than `4`
-- `rx-poller-threads=8` looked worse in achieved rate and tails
-
-That suggests a real tradeoff:
-
-- too few RX pollers can under-serve many channels
-- too many `YIELDING` RX pollers start competing with caller threads, offload work, and the media driver
-
-There is no universal best number. Measure on the target machine.
+There is no universal best value. Measure on the actual target machine.
 
 ## Comparison With Raw Aeron
 
-Raw Aeron echo benchmarks will usually look better than `rpc-core` because raw Aeron does less work:
+Raw Aeron echo benchmarks will usually look better than `rpc-core` because raw
+Aeron does less work:
 
 - no request/response API layer
 - no pending-call registry
@@ -241,24 +285,18 @@ Raw Aeron echo benchmarks will usually look better than `rpc-core` because raw A
 - no response matching for blocking callers
 - no user handler abstraction
 
-So the right comparison is not "why is RPC slower than raw Aeron".
+The useful comparison is not "why is RPC slower than raw Aeron".
 
-The right comparison is:
+The useful comparison is:
 
-- how much extra latency the synchronous RPC abstraction adds
-- how well it scales across channels
-- whether it remains safe and predictable under real handler behavior
-
-In practice:
-
-- with one caller thread, transport overhead stays relatively low
-- with many threads on one channel, publication contention becomes visible
-- with several channels on one driver, scaling is better than forcing all traffic through one channel
+- how much latency the synchronous RPC abstraction adds
+- how it scales across channels
+- whether it stays correct and predictable under real handler behavior
 
 ## JMH Microbenchmarks
 
-JMH benchmarks are still useful for narrow code-path exploration, but they are secondary to the standalone RTT benchmark
-when evaluating production-facing synchronous behavior.
+JMH benchmarks are still useful for narrow code-path exploration, but they are
+secondary to the standalone RTT benchmark for production-facing sync behavior.
 
 Build:
 
@@ -273,7 +311,7 @@ java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
   -jar target/rpc-core-benchmarks.jar -l
 ```
 
-Run JMH benchmark:
+Run one JMH benchmark:
 
 ```bash
 java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
@@ -282,14 +320,16 @@ java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
 
 ## Validation Beyond Benchmarks
 
-There are also correctness tests for the important non-happy-path cases:
+Correctness still matters as much as speed.
 
-- concurrent response correlation
-- IO-like offloaded handlers across several channels
-- reconnect wait strategy
-
-Run them with:
+Useful validation commands:
 
 ```bash
 mvn test
+```
+
+and
+
+```bash
+mvn -Pbenchmarks -DskipTests package
 ```

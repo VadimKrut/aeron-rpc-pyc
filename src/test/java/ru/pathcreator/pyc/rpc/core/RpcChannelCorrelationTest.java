@@ -6,9 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import ru.pathcreator.pyc.rpc.core.codec.MessageCodec;
 import ru.pathcreator.pyc.rpc.core.envelope.Envelope;
-import ru.pathcreator.pyc.rpc.core.exceptions.RemoteRpcException;
-import ru.pathcreator.pyc.rpc.core.exceptions.RpcApplicationException;
-import ru.pathcreator.pyc.rpc.core.exceptions.RpcStatus;
+import ru.pathcreator.pyc.rpc.core.exceptions.*;
 
 import java.nio.ByteOrder;
 import java.nio.file.Files;
@@ -17,10 +15,10 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.*;
 
 class RpcChannelCorrelationTest {
 
@@ -313,6 +311,323 @@ class RpcChannelCorrelationTest {
         }
     }
 
+    @Test
+    @Timeout(value = 20, unit = TimeUnit.SECONDS)
+    void protocolHandshakeCompletesLazilyAndCapturesRemoteInfo() throws Exception {
+        final Path aeronDir = Files.createTempDirectory("rpc-core-handshake-");
+        try (RpcNode node = RpcNode.start(NodeConfig.builder()
+                .aeronDir(aeronDir.toString())
+                .embeddedDriver(true)
+                .build())) {
+            final int basePort = 35_000 + ThreadLocalRandom.current().nextInt(10_000);
+            final int streamId = 2_001 + ThreadLocalRandom.current().nextInt(1_000);
+            final RpcChannel client = node.channel(ChannelConfig.builder()
+                    .localEndpoint("localhost:" + basePort)
+                    .remoteEndpoint("localhost:" + (basePort + 1))
+                    .streamId(streamId)
+                    .defaultTimeout(Duration.ofSeconds(5))
+                    .offerTimeout(Duration.ofSeconds(3))
+                    .heartbeatInterval(Duration.ofMillis(50))
+                    .heartbeatMissedLimit(10)
+                    .offloadExecutor(ChannelConfig.DIRECT_EXECUTOR)
+                    .protocolHandshakeEnabled(true)
+                    .protocolVersion(7)
+                    .protocolCapabilities(0b101L)
+                    .requiredRemoteCapabilities(0b001L)
+                    .build());
+            final RpcChannel server = node.channel(ChannelConfig.builder()
+                    .localEndpoint("localhost:" + (basePort + 1))
+                    .remoteEndpoint("localhost:" + basePort)
+                    .streamId(streamId)
+                    .defaultTimeout(Duration.ofSeconds(5))
+                    .offerTimeout(Duration.ofSeconds(3))
+                    .heartbeatInterval(Duration.ofMillis(50))
+                    .heartbeatMissedLimit(10)
+                    .offloadExecutor(ChannelConfig.DIRECT_EXECUTOR)
+                    .protocolHandshakeEnabled(true)
+                    .protocolVersion(7)
+                    .protocolCapabilities(0b111L)
+                    .build());
+
+            server.onRequest(REQUEST_TYPE, RESPONSE_TYPE, INT_CODEC, INT_CODEC, request -> request);
+            server.start();
+            client.start();
+            waitConnected(client, server);
+
+            assertFalse(client.isProtocolHandshakeComplete());
+            assertEquals(12, client.call(REQUEST_TYPE, RESPONSE_TYPE, 12, INT_CODEC, INT_CODEC, 5, TimeUnit.SECONDS));
+            assertTrue(client.isProtocolHandshakeComplete());
+            assertEquals(7, client.remoteProtocolVersion());
+            assertEquals(0b111L, client.remoteProtocolCapabilities());
+        }
+    }
+
+    @Test
+    @Timeout(value = 20, unit = TimeUnit.SECONDS)
+    void protocolHandshakeRejectsVersionMismatch() throws Exception {
+        final Path aeronDir = Files.createTempDirectory("rpc-core-handshake-mismatch-");
+        try (RpcNode node = RpcNode.start(NodeConfig.builder()
+                .aeronDir(aeronDir.toString())
+                .embeddedDriver(true)
+                .build())) {
+            final int basePort = 35_000 + ThreadLocalRandom.current().nextInt(10_000);
+            final int streamId = 2_001 + ThreadLocalRandom.current().nextInt(1_000);
+            final RpcChannel client = node.channel(ChannelConfig.builder()
+                    .localEndpoint("localhost:" + basePort)
+                    .remoteEndpoint("localhost:" + (basePort + 1))
+                    .streamId(streamId)
+                    .defaultTimeout(Duration.ofSeconds(5))
+                    .offerTimeout(Duration.ofSeconds(3))
+                    .heartbeatInterval(Duration.ofMillis(50))
+                    .heartbeatMissedLimit(10)
+                    .offloadExecutor(ChannelConfig.DIRECT_EXECUTOR)
+                    .protocolHandshakeEnabled(true)
+                    .protocolVersion(7)
+                    .build());
+            final RpcChannel server = node.channel(ChannelConfig.builder()
+                    .localEndpoint("localhost:" + (basePort + 1))
+                    .remoteEndpoint("localhost:" + basePort)
+                    .streamId(streamId)
+                    .defaultTimeout(Duration.ofSeconds(5))
+                    .offerTimeout(Duration.ofSeconds(3))
+                    .heartbeatInterval(Duration.ofMillis(50))
+                    .heartbeatMissedLimit(10)
+                    .offloadExecutor(ChannelConfig.DIRECT_EXECUTOR)
+                    .protocolHandshakeEnabled(true)
+                    .protocolVersion(8)
+                    .build());
+
+            server.onRequest(REQUEST_TYPE, RESPONSE_TYPE, INT_CODEC, INT_CODEC, request -> request);
+            server.start();
+            client.start();
+            waitConnected(client, server);
+
+            assertInstanceOf(ProtocolMismatchException.class, org.junit.jupiter.api.Assertions.assertThrows(
+                    ProtocolMismatchException.class,
+                    () -> client.call(REQUEST_TYPE, RESPONSE_TYPE, 7, INT_CODEC, INT_CODEC, 5, TimeUnit.SECONDS)));
+        }
+    }
+
+    @Test
+    @Timeout(value = 20, unit = TimeUnit.SECONDS)
+    void drainModeLetsInflightRequestFinishAndRejectsNewCalls() throws Exception {
+        final Path aeronDir = Files.createTempDirectory("rpc-core-drain-");
+        try (RpcNode node = RpcNode.start(NodeConfig.builder()
+                .aeronDir(aeronDir.toString())
+                .embeddedDriver(true)
+                .build())) {
+            final int basePort = 35_000 + ThreadLocalRandom.current().nextInt(10_000);
+            final int streamId = 2_001 + ThreadLocalRandom.current().nextInt(1_000);
+            final CountDownLatch entered = new CountDownLatch(1);
+            final CountDownLatch release = new CountDownLatch(1);
+            final RpcChannel client = node.channel(channelConfig(
+                    "localhost:" + basePort,
+                    "localhost:" + (basePort + 1),
+                    streamId));
+            final RpcChannel server = node.channel(channelConfig(
+                    "localhost:" + (basePort + 1),
+                    "localhost:" + basePort,
+                    streamId,
+                    false));
+
+            server.onRequest(REQUEST_TYPE, RESPONSE_TYPE, INT_CODEC, INT_CODEC, request -> {
+                entered.countDown();
+                try {
+                    release.await(5, TimeUnit.SECONDS);
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("drain test interrupted", e);
+                }
+                return request;
+            });
+            server.start();
+            client.start();
+            waitConnected(client, server);
+
+            final ExecutorService executor = Executors.newSingleThreadExecutor();
+            try {
+                final Future<Integer> first = executor.submit(() -> client.call(
+                        REQUEST_TYPE, RESPONSE_TYPE, 42, INT_CODEC, INT_CODEC, 5, TimeUnit.SECONDS));
+                assertTrue(entered.await(5, TimeUnit.SECONDS));
+                server.beginDrain();
+
+                final RemoteRpcException secondFailure = assertInstanceOf(RemoteRpcException.class, org.junit.jupiter.api.Assertions.assertThrows(
+                        RemoteRpcException.class,
+                        () -> client.call(REQUEST_TYPE, RESPONSE_TYPE, 43, INT_CODEC, INT_CODEC, 5, TimeUnit.SECONDS)));
+                assertEquals(RpcStatus.SERVICE_UNAVAILABLE.code(), secondFailure.statusCode());
+
+                release.countDown();
+                assertEquals(42, first.get());
+                assertTrue(server.awaitDrained(5, TimeUnit.SECONDS));
+            } finally {
+                executor.shutdownNow();
+            }
+        }
+    }
+
+    @Test
+    @Timeout(value = 20, unit = TimeUnit.SECONDS)
+    void typedRpcMethodFacadeWorks() throws Exception {
+        final Path aeronDir = Files.createTempDirectory("rpc-core-typed-method-");
+        try (RpcNode node = RpcNode.start(NodeConfig.builder()
+                .aeronDir(aeronDir.toString())
+                .embeddedDriver(true)
+                .build())) {
+            final int basePort = 35_000 + ThreadLocalRandom.current().nextInt(10_000);
+            final int streamId = 2_001 + ThreadLocalRandom.current().nextInt(1_000);
+            final RpcChannel client = node.channel(channelConfig(
+                    "localhost:" + basePort,
+                    "localhost:" + (basePort + 1),
+                    streamId));
+            final RpcChannel server = node.channel(channelConfig(
+                    "localhost:" + (basePort + 1),
+                    "localhost:" + basePort,
+                    streamId));
+
+            final RpcMethod<Integer, Integer> sum = RpcMethod.of(REQUEST_TYPE, RESPONSE_TYPE, INT_CODEC, INT_CODEC);
+            sum.register(server, request -> request + 1);
+            server.start();
+            client.start();
+            waitConnected(client, server);
+
+            assertEquals(11, sum.call(client, 10));
+        }
+    }
+
+    @Test
+    @Timeout(value = 20, unit = TimeUnit.SECONDS)
+    void listenersObserveSuccessAndRemoteError() throws Exception {
+        final Path aeronDir = Files.createTempDirectory("rpc-core-listener-");
+        final CountingListener listener = new CountingListener();
+        try (RpcNode node = RpcNode.start(NodeConfig.builder()
+                .aeronDir(aeronDir.toString())
+                .embeddedDriver(true)
+                .build())) {
+            final int basePort = 35_000 + ThreadLocalRandom.current().nextInt(10_000);
+            final int streamId = 2_001 + ThreadLocalRandom.current().nextInt(1_000);
+            final RpcChannel client = node.channel(ChannelConfig.builder()
+                    .localEndpoint("localhost:" + basePort)
+                    .remoteEndpoint("localhost:" + (basePort + 1))
+                    .streamId(streamId)
+                    .defaultTimeout(Duration.ofSeconds(5))
+                    .offerTimeout(Duration.ofSeconds(3))
+                    .heartbeatInterval(Duration.ofMillis(50))
+                    .heartbeatMissedLimit(10)
+                    .offloadExecutor(ChannelConfig.DIRECT_EXECUTOR)
+                    .listener(listener)
+                    .build());
+            final RpcChannel server = node.channel(channelConfig(
+                    "localhost:" + (basePort + 1),
+                    "localhost:" + basePort,
+                    streamId));
+
+            server.onRequest(11, 21, INT_CODEC, INT_CODEC, request -> request);
+            server.onRequest(12, 22, INT_CODEC, INT_CODEC, request -> {
+                throw new RpcApplicationException(RpcStatus.CONFLICT, "duplicate");
+            });
+            server.start();
+            client.start();
+            waitConnected(client, server);
+
+            assertEquals(1, client.call(11, 21, 1, INT_CODEC, INT_CODEC, 5, TimeUnit.SECONDS));
+            final RemoteRpcException remoteError = assertInstanceOf(RemoteRpcException.class, org.junit.jupiter.api.Assertions.assertThrows(
+                    RemoteRpcException.class,
+                    () -> client.call(12, 22, 2, INT_CODEC, INT_CODEC, 5, TimeUnit.SECONDS)));
+            assertEquals(RpcStatus.CONFLICT.code(), remoteError.statusCode());
+            assertEquals(2, listener.started.get());
+            assertEquals(1, listener.succeeded.get());
+            assertEquals(1, listener.failed.get());
+            assertEquals(1, listener.remoteErrors.get());
+            assertTrue(listener.channelUp.get() >= 1);
+        }
+    }
+
+    @Test
+    @Timeout(value = 20, unit = TimeUnit.SECONDS)
+    void recreateReconnectStrategyAttemptsRecoveryBeforeRemoteStarts() throws Exception {
+        final Path aeronDir = Files.createTempDirectory("rpc-core-recreate-");
+        final CountingListener listener = new CountingListener();
+        try (RpcNode node = RpcNode.start(NodeConfig.builder()
+                .aeronDir(aeronDir.toString())
+                .embeddedDriver(true)
+                .build())) {
+            final int basePort = 35_000 + ThreadLocalRandom.current().nextInt(10_000);
+            final int streamId = 2_001 + ThreadLocalRandom.current().nextInt(1_000);
+            final RpcChannel client = node.channel(ChannelConfig.builder()
+                    .localEndpoint("localhost:" + basePort)
+                    .remoteEndpoint("localhost:" + (basePort + 1))
+                    .streamId(streamId)
+                    .defaultTimeout(Duration.ofSeconds(5))
+                    .offerTimeout(Duration.ofSeconds(3))
+                    .heartbeatInterval(Duration.ofMillis(50))
+                    .heartbeatMissedLimit(10)
+                    .offloadExecutor(ChannelConfig.DIRECT_EXECUTOR)
+                    .reconnectStrategy(ReconnectStrategy.RECREATE_ON_DISCONNECT)
+                    .listener(listener)
+                    .build());
+
+            client.start();
+            final ExecutorService executor = Executors.newSingleThreadExecutor();
+            try {
+                final Future<Integer> response = executor.submit(() -> client.call(
+                        REQUEST_TYPE, RESPONSE_TYPE, 42, INT_CODEC, INT_CODEC, 5, TimeUnit.SECONDS));
+                Thread.sleep(250);
+
+                final RpcChannel server = node.channel(channelConfig(
+                        "localhost:" + (basePort + 1),
+                        "localhost:" + basePort,
+                        streamId));
+                server.onRequest(REQUEST_TYPE, RESPONSE_TYPE, INT_CODEC, INT_CODEC, request -> request);
+                server.start();
+                waitConnected(client, server);
+
+                assertEquals(42, response.get());
+                assertTrue(listener.reconnectAttempts.get() > 0);
+            } finally {
+                executor.shutdownNow();
+            }
+        }
+    }
+
+    @Test
+    @Timeout(value = 20, unit = TimeUnit.SECONDS)
+    void lateResponseAfterTimeoutDoesNotCorruptNextCall() throws Exception {
+        final Path aeronDir = Files.createTempDirectory("rpc-core-late-response-");
+        final AtomicInteger counter = new AtomicInteger();
+        try (RpcNode node = RpcNode.start(NodeConfig.builder()
+                .aeronDir(aeronDir.toString())
+                .embeddedDriver(true)
+                .build())) {
+            final int basePort = 35_000 + ThreadLocalRandom.current().nextInt(10_000);
+            final int streamId = 2_001 + ThreadLocalRandom.current().nextInt(1_000);
+            final RpcChannel client = node.channel(channelConfig(
+                    "localhost:" + basePort,
+                    "localhost:" + (basePort + 1),
+                    streamId));
+            final RpcChannel server = node.channel(channelConfig(
+                    "localhost:" + (basePort + 1),
+                    "localhost:" + basePort,
+                    streamId,
+                    false));
+
+            server.onRequest(REQUEST_TYPE, RESPONSE_TYPE, INT_CODEC, INT_CODEC, request -> {
+                if (counter.incrementAndGet() == 1) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(300));
+                }
+                return request;
+            });
+            server.start();
+            client.start();
+            waitConnected(client, server);
+
+            assertInstanceOf(RpcTimeoutException.class, org.junit.jupiter.api.Assertions.assertThrows(
+                    RpcTimeoutException.class,
+                    () -> client.call(REQUEST_TYPE, RESPONSE_TYPE, 1, INT_CODEC, INT_CODEC, 100, TimeUnit.MILLISECONDS)));
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(350));
+            assertEquals(2, client.call(REQUEST_TYPE, RESPONSE_TYPE, 2, INT_CODEC, INT_CODEC, 5, TimeUnit.SECONDS));
+        }
+    }
+
     private static Callable<Void> caller(
             final RpcChannel client,
             final CountDownLatch start,
@@ -476,6 +791,45 @@ class RpcChannelCorrelationTest {
             final byte[] bytes = new byte[length];
             buffer.getBytes(offset, bytes);
             return bytes;
+        }
+    }
+
+    private static final class CountingListener implements RpcChannelListener {
+        private final AtomicInteger started = new AtomicInteger();
+        private final AtomicInteger succeeded = new AtomicInteger();
+        private final AtomicInteger failed = new AtomicInteger();
+        private final AtomicInteger remoteErrors = new AtomicInteger();
+        private final AtomicInteger channelUp = new AtomicInteger();
+        private final AtomicInteger reconnectAttempts = new AtomicInteger();
+
+        @Override
+        public void onCallStarted(final RpcChannel channel, final int requestMessageTypeId, final long correlationId) {
+            started.incrementAndGet();
+        }
+
+        @Override
+        public void onCallSucceeded(final RpcChannel channel, final int requestMessageTypeId, final long correlationId) {
+            succeeded.incrementAndGet();
+        }
+
+        @Override
+        public void onCallFailed(final RpcChannel channel, final int requestMessageTypeId, final long correlationId, final ru.pathcreator.pyc.rpc.core.exceptions.RpcException failure) {
+            failed.incrementAndGet();
+        }
+
+        @Override
+        public void onRemoteError(final RpcChannel channel, final int responseMessageTypeId, final long correlationId, final ru.pathcreator.pyc.rpc.core.exceptions.RpcException failure) {
+            remoteErrors.incrementAndGet();
+        }
+
+        @Override
+        public void onChannelUp(final RpcChannel channel) {
+            channelUp.incrementAndGet();
+        }
+
+        @Override
+        public void onReconnectAttempt(final RpcChannel channel, final ReconnectStrategy strategy) {
+            reconnectAttempts.incrementAndGet();
         }
     }
 }

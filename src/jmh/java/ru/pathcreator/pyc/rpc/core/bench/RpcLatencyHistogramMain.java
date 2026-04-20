@@ -8,7 +8,9 @@ import ru.pathcreator.pyc.rpc.core.IdleStrategyKind;
 import ru.pathcreator.pyc.rpc.core.NodeConfig;
 import ru.pathcreator.pyc.rpc.core.RawRequestHandler;
 import ru.pathcreator.pyc.rpc.core.RpcChannel;
+import ru.pathcreator.pyc.rpc.core.RpcChannelListener;
 import ru.pathcreator.pyc.rpc.core.RpcNode;
+import ru.pathcreator.pyc.rpc.core.ReconnectStrategy;
 import ru.pathcreator.pyc.rpc.core.codec.MessageCodec;
 
 import java.io.PrintStream;
@@ -37,6 +39,8 @@ public final class RpcLatencyHistogramMain {
     private static final int REQUEST_TYPE = 1;
     private static final int RESPONSE_TYPE = 2;
     private static final ByteArrayCodec CODEC = new ByteArrayCodec();
+    private static final RpcChannelListener BENCHMARK_LISTENER = new RpcChannelListener() {
+    };
 
     private static volatile int sink;
 
@@ -106,6 +110,9 @@ public final class RpcLatencyHistogramMain {
         out.printf(Locale.ROOT, "Handler mode:         %s%n", options.handlerMode);
         out.printf(Locale.ROOT, "Handler IO delay:     %,d ns%n", options.handlerIoNanos);
         out.printf(Locale.ROOT, "RX idle strategy:     %s%n", options.idleStrategy);
+        out.printf(Locale.ROOT, "Protocol handshake:   %s%n", options.protocolHandshakeEnabled);
+        out.printf(Locale.ROOT, "Listeners enabled:    %s%n", options.listenersEnabled);
+        out.printf(Locale.ROOT, "Reconnect strategy:   %s%n", options.reconnectStrategy);
         out.printf(Locale.ROOT, "Max tracked latency:  %,d us%n", TimeUnit.NANOSECONDS.toMicros(options.highestTrackableNs));
         out.printf(Locale.ROOT, "Significant digits:   %,d%n", options.significantDigits);
         out.println();
@@ -174,7 +181,7 @@ public final class RpcLatencyHistogramMain {
         System.out.println();
         System.out.printf(
                 Locale.ROOT,
-                "Histogram [rpc-core-udp-loopback-%db-rate=%d-threads=%d-channels=%d-rxPollers=%d-burst=%d-handler=%s-ioNs=%d-idle=%s]:%n",
+                "Histogram [rpc-core-udp-loopback-%db-rate=%d-threads=%d-channels=%d-rxPollers=%d-burst=%d-handler=%s-ioNs=%d-idle=%s-handshake=%s-listeners=%s-reconnect=%s]:%n",
                 options.payloadSize,
                 options.rate,
                 options.threads,
@@ -183,7 +190,10 @@ public final class RpcLatencyHistogramMain {
                 options.burstSize,
                 options.handlerMode,
                 options.handlerIoNanos,
-                options.idleStrategy);
+                options.idleStrategy,
+                options.protocolHandshakeEnabled,
+                options.listenersEnabled,
+                options.reconnectStrategy);
         histogram.outputPercentileDistribution(System.out, 1_000.0);
         System.out.println();
         System.out.printf(Locale.ROOT, "#[Mean    = %12.3f, StdDeviation   = %12.3f]%n", histogram.getMean() / 1_000.0, histogram.getStdDeviation() / 1_000.0);
@@ -350,6 +360,7 @@ public final class RpcLatencyHistogramMain {
                 client.start();
             }
             waitConnected(clients, servers);
+            primeOptionalFeatures(clients, options);
 
             return new BenchmarkContext(node, clients);
         }
@@ -374,6 +385,9 @@ public final class RpcLatencyHistogramMain {
                     .heartbeatInterval(Duration.ofMillis(50))
                     .heartbeatMissedLimit(10)
                     .rxIdleStrategy(options.idleStrategy)
+                    .reconnectStrategy(options.reconnectStrategy)
+                    .protocolHandshakeEnabled(options.protocolHandshakeEnabled)
+                    .protocolVersion(1)
                     .pendingPoolCapacity(65_536)
                     .registryInitialCapacity(65_536)
                     .offloadTaskPoolSize(65_536)
@@ -382,6 +396,9 @@ public final class RpcLatencyHistogramMain {
 
             if (options.handlerMode == HandlerMode.DIRECT) {
                 builder.offloadExecutor(ChannelConfig.DIRECT_EXECUTOR);
+            }
+            if (options.listenersEnabled) {
+                builder.listener(BENCHMARK_LISTENER);
             }
             return builder.build();
         }
@@ -413,6 +430,26 @@ public final class RpcLatencyHistogramMain {
             }
             throw new IllegalStateException("RPC benchmark channels did not connect in time");
         }
+
+        private static void primeOptionalFeatures(final RpcChannel[] clients, final Options options) {
+            if (!options.protocolHandshakeEnabled) {
+                return;
+            }
+            final byte[] request = payload(options.payloadSize);
+            for (final RpcChannel client : clients) {
+                final byte[] response = client.call(
+                        REQUEST_TYPE,
+                        RESPONSE_TYPE,
+                        request,
+                        CODEC,
+                        CODEC,
+                        5,
+                        TimeUnit.SECONDS);
+                Worker.validateResponse(request, response);
+                sink ^= response[0];
+                sink ^= response[response.length - 1];
+            }
+        }
     }
 
     private enum HandlerMode {
@@ -437,6 +474,9 @@ public final class RpcLatencyHistogramMain {
         private int significantDigits = 3;
         private HandlerMode handlerMode = HandlerMode.DIRECT;
         private IdleStrategyKind idleStrategy = IdleStrategyKind.YIELDING;
+        private boolean protocolHandshakeEnabled = false;
+        private boolean listenersEnabled = false;
+        private ReconnectStrategy reconnectStrategy = ReconnectStrategy.FAIL_FAST;
 
         static Options parse(final String[] args) {
             final Options options = new Options();
@@ -467,6 +507,10 @@ public final class RpcLatencyHistogramMain {
                     case "significant-digits" -> options.significantDigits = Integer.parseInt(value);
                     case "handler" -> options.handlerMode = HandlerMode.valueOf(value.toUpperCase(Locale.ROOT));
                     case "idle" -> options.idleStrategy = IdleStrategyKind.valueOf(value.toUpperCase(Locale.ROOT));
+                    case "protocol-handshake" -> options.protocolHandshakeEnabled = Boolean.parseBoolean(value);
+                    case "listeners" -> options.listenersEnabled = Boolean.parseBoolean(value);
+                    case "reconnect" ->
+                            options.reconnectStrategy = ReconnectStrategy.valueOf(value.toUpperCase(Locale.ROOT));
                     default -> throw new IllegalArgumentException("unknown argument: " + key);
                 }
             }

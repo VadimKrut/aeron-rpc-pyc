@@ -144,6 +144,11 @@ public final class Envelope {
     public static final int RESERVED_HEARTBEAT = -1;
 
     /**
+     * Reserved message type identifier used for optional protocol handshake frames.
+     */
+    public static final int RESERVED_PROTOCOL_HANDSHAKE = -2;
+
+    /**
      * Запрещает создание экземпляров этого класса с константами.
      *
      * <p>Prevents instantiation of this constants-only class.</p>
