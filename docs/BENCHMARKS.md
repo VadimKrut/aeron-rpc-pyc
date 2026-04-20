@@ -244,6 +244,34 @@ What this means:
 - if you want the leanest possible profile, you can still keep these features
   off
 
+Startup-only layers such as the service registry are intentionally not measured
+as hot-path features. They are meant for pre-traffic validation and reporting,
+not per-call dispatch.
+
+## Recent Sanity Runs
+
+After the startup-only service registry layer was added, fresh WSL sanity runs
+still looked healthy for the normal transport path:
+
+### 1 channel / 1 thread / 32 bytes
+
+- `p50 7.027 us`
+- `p90 12.367 us`
+- `p99 39.359 us`
+- `p99.9 170.623 us`
+- `99,754 ops/s`
+
+### 2 channels / 4 threads / 32 bytes
+
+- `p50 24.367 us`
+- `p90 55.743 us`
+- `p99 106.751 us`
+- `p99.9 289.791 us`
+- `120,755 ops/s`
+
+That matches the intended design: startup-only registry and reporting logic do
+not sit in the steady-state request path.
+
 ## Practical Observations
 
 ### 1 channel / 1 thread

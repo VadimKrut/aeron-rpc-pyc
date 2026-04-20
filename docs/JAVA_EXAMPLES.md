@@ -14,6 +14,12 @@ The focus here is practical integration:
 For setting-by-setting tuning advice, see
 [`CHANNEL_TUNING.md`](CHANNEL_TUNING.md).
 
+For startup-time channel and method inventory, validation, and reporting, see
+[`SERVICE_REGISTRY.md`](SERVICE_REGISTRY.md).
+
+For listener-based counters outside the transport core, see
+[`METRICS_MODULE.md`](METRICS_MODULE.md).
+
 ## 1. Smallest Working Example
 
 ```java
@@ -163,9 +169,13 @@ A common layout is:
 - several request message types
 
 ```java
-server.onRequest(1, 101, priceRequestCodec, priceResponseCodec, this::handlePrice);
-server.onRequest(2, 102, orderRequestCodec, orderResponseCodec, this::handleOrder);
-server.onRequest(3, 103, riskRequestCodec, riskResponseCodec, this::handleRisk);
+server.onRequest(1,101,priceRequestCodec, priceResponseCodec, this::handlePrice);
+server.
+
+onRequest(2,102,orderRequestCodec, orderResponseCodec, this::handleOrder);
+server.
+
+onRequest(3,103,riskRequestCodec, riskResponseCodec, this::handleRisk);
 ```
 
 Why this is safe:
@@ -176,7 +186,103 @@ Why this is safe:
 
 Use separate channels or streams only when you want stronger isolation.
 
-## 4. Handler Modes
+## 4. Optional Service Registry
+
+If the service has enough methods that you want startup-time validation and a
+readable inventory, use the optional registry layer above `RpcMethod`:
+
+```java
+import ru.pathcreator.pyc.rpc.core.ChannelConfig;
+import ru.pathcreator.pyc.rpc.core.RpcMethod;
+import ru.pathcreator.pyc.rpc.schema.RpcServiceRegistry;
+
+RpcMethod<OrderRequest, OrderResponse> placeOrder =
+        RpcMethod.of(10, 110, orderRequestCodec, orderResponseCodec);
+
+RpcMethod<RiskRequest, RiskResponse> checkRisk =
+        RpcMethod.of(11, 111, riskRequestCodec, riskResponseCodec);
+
+RpcServiceRegistry.Builder builder = RpcServiceRegistry.builder();
+builder.
+
+channel(
+                "orders",
+                ChannelConfig.builder()
+                        .
+
+localEndpoint("10.10.0.11:40101")
+                        .
+
+remoteEndpoint("10.10.0.12:40101")
+                        .
+
+streamId(2001)
+                        .
+
+protocolHandshakeEnabled(true)
+                        .
+
+protocolVersion(2)
+                        .
+
+build()
+        )
+                .
+
+method("place-order",placeOrder, OrderRequest .class, OrderResponse .class, "v2","main order entry path")
+        .
+
+method("check-risk",checkRisk, RiskRequest .class, RiskResponse .class);
+
+RpcServiceRegistry registry = builder.build();
+System.out.
+
+println(registry.renderTextReport());
+```
+
+This is a startup-time helper only. It does not change the transport call path.
+
+## 5. Optional Metrics Layer
+
+If you want lightweight counters without pushing a metrics backend into the
+core transport, use the listener-based metrics package:
+
+```java
+import ru.pathcreator.pyc.rpc.core.ChannelConfig;
+import ru.pathcreator.pyc.rpc.core.RpcChannel;
+import ru.pathcreator.pyc.rpc.metrics.RpcMetricsListener;
+import ru.pathcreator.pyc.rpc.metrics.RpcMetricsSnapshot;
+
+RpcMetricsListener metrics = new RpcMetricsListener();
+
+RpcChannel channel = node.channel(
+        ChannelConfig.builder()
+                .localEndpoint("127.0.0.1:40101")
+                .remoteEndpoint("127.0.0.1:40102")
+                .streamId(2001)
+                .listener(metrics)
+                .build()
+);
+
+channel.
+
+start();
+
+RpcMetricsSnapshot snapshot = metrics.snapshot();
+System.out.
+
+println(snapshot.callsStarted());
+        System.out.
+
+println(snapshot.callsSucceeded());
+        System.out.
+
+println(metrics.completedCalls());
+```
+
+This layer is optional and remains outside `rpc.core`.
+
+## 6. Handler Modes
 
 ### `OFFLOAD`
 
@@ -185,10 +291,12 @@ Best default for real services.
 ```java
 channel.onRequest(
         10,
-        11,
+                11,
         requestCodec,
         responseCodec,
-        request -> service.handle(request)
+        request ->service.
+
+handle(request)
 );
 ```
 
@@ -217,7 +325,7 @@ RpcChannel channel = node.channel(
 This removes offload scheduling and copy overhead, but a slow handler blocks
 receive progress.
 
-## 5. Reconnect Modes
+## 7. Reconnect Modes
 
 ### Fail fast
 
@@ -260,7 +368,7 @@ ChannelConfig config = ChannelConfig.builder()
 Use this only when you need stronger recovery behavior than simply waiting for
 the current path to reconnect.
 
-## 6. Many Channels On One Driver
+## 8. Many Channels On One Driver
 
 This is the recommended layout when your application has several independent
 logical connections.
@@ -299,15 +407,21 @@ RpcChannel referenceData = node.channel(
                 .build()
 );
 
-marketData.start();
-orders.start();
-referenceData.start();
+marketData.
+
+start();
+orders.
+
+start();
+referenceData.
+
+start();
 ```
 
 In practice, several channels usually scale better than pushing many callers
 through one channel.
 
-## 7. Several Caller Threads On One Channel
+## 9. Several Caller Threads On One Channel
 
 This is supported and safe, but it usually scales worse than spreading the
 traffic across several channels.
@@ -323,12 +437,14 @@ RpcChannel sharedChannel = node.channel(
                 .build()
 );
 
-sharedChannel.start();
+sharedChannel.
+
+start();
 
 // Many application threads can call sharedChannel.call(...)
 ```
 
-## 8. Embedded Driver Vs External Driver
+## 10. Embedded Driver Vs External Driver
 
 ### Embedded driver
 
@@ -357,7 +473,7 @@ RpcNode node = RpcNode.start(
 );
 ```
 
-## 9. Backpressure Policy
+## 11. Backpressure Policy
 
 ### `BLOCK`
 
@@ -366,12 +482,13 @@ Default and usually the right choice for synchronous RPC.
 ```java
 channel.call(
         1,
-        2,
+                2,
         request,
         requestCodec,
         responseCodec,
         Duration.ofMillis(10),
-        BackpressurePolicy.BLOCK
+
+BackpressurePolicy.BLOCK
 );
 ```
 
@@ -382,16 +499,17 @@ Use this when the caller should immediately fall back or abort.
 ```java
 channel.call(
         1,
-        2,
+                2,
         request,
         requestCodec,
         responseCodec,
         Duration.ofMillis(10),
-        BackpressurePolicy.FAIL_FAST
+
+BackpressurePolicy.FAIL_FAST
 );
 ```
 
-## 10. Large Payload Guidance
+## 12. Large Payload Guidance
 
 Regular `RpcChannel` supports a single message up to `16 MiB` total size.
 
@@ -403,7 +521,7 @@ That means:
 - payloads larger than one message should use application-level chunking or a
   separate transfer path
 
-## 11. Remote Errors
+## 13. Remote Errors
 
 If a server-side handler fails, the caller receives a structured
 `RemoteRpcException` instead of waiting until timeout.
@@ -417,19 +535,29 @@ import ru.pathcreator.pyc.rpc.core.exceptions.RpcStatus;
 
 server.onRequest(
         1,
-        2,
+                2,
         orderRequestCodec,
         orderResponseCodec,
-        request -> {
-            if (request.quantity() <= 0) {
-                throw new RpcApplicationException(RpcStatus.BAD_REQUEST, "quantity must be positive");
+        request ->{
+        if(request.
+
+quantity() <=0){
+        throw new
+
+RpcApplicationException(RpcStatus.BAD_REQUEST, "quantity must be positive");
             }
-            if (request.accountId() == 0) {
-                throw new RpcApplicationException(1001, "account is not allowed to trade");
+                    if(request.
+
+accountId() ==0){
+        throw new
+
+RpcApplicationException(1001,"account is not allowed to trade");
             }
-            return handleOrder(request);
+                    return
+
+handleOrder(request);
         }
-);
+                );
 ```
 
 Recommended convention:
@@ -438,9 +566,9 @@ Recommended convention:
   failures
 - use custom codes `>= 1000` for business-specific errors
 
-## 12. Optional Compatibility And Observability Features
+## 14. Optional Compatibility And Observability Features
 
-Recent `0.0.9` work added optional service-level features above the core fast
+Recent `0.1.0` work added optional service-level features above the core fast
 path:
 
 - protocol handshake
@@ -458,7 +586,7 @@ Important guidance:
 For the benchmark commands and current measurements, see
 [`BENCHMARKS.md`](BENCHMARKS.md).
 
-## 13. Validation
+## 15. Validation
 
 After changing settings, validate with both:
 
@@ -471,3 +599,6 @@ and
 ```bash
 mvn -Pbenchmarks -DskipTests package
 ```
+
+If the service has many methods or channels, it is also a good idea to render
+and review the startup registry report before rollout.

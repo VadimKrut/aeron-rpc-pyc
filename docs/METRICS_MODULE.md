@@ -1,0 +1,82 @@
+# Metrics Module
+
+`rpc-core` keeps transport observability in the optional
+`RpcChannelListener` API. The built-in metrics layer lives outside
+`rpc.core` in `ru.pathcreator.pyc.rpc.metrics`.
+
+## What It Is
+
+`RpcMetricsListener` is a ready-to-use listener-backed counter collector.
+It records:
+
+- calls started
+- calls succeeded
+- calls timed out
+- calls failed
+- remote errors
+- channel up/down transitions
+- drain lifecycle events
+- reconnect attempt/success/failure
+- protocol handshake start/success/failure
+- aggregate completed local calls through `completedCalls()`
+
+## Why It Lives Outside `rpc.core`
+
+The transport core should stay focused on latency and correctness.
+Metrics are useful, but they are a service-level concern, so this layer is
+kept separate and optional.
+
+When no listeners are configured, the transport stays on the leanest path.
+
+## Example
+
+```java
+import ru.pathcreator.pyc.rpc.core.ChannelConfig;
+import ru.pathcreator.pyc.rpc.core.RpcChannel;
+import ru.pathcreator.pyc.rpc.core.RpcNode;
+import ru.pathcreator.pyc.rpc.metrics.RpcMetricsListener;
+import ru.pathcreator.pyc.rpc.metrics.RpcMetricsSnapshot;
+
+RpcMetricsListener metrics = new RpcMetricsListener();
+
+RpcChannel channel = node.channel(
+        ChannelConfig.builder()
+                .localEndpoint("127.0.0.1:40101")
+                .remoteEndpoint("127.0.0.1:40102")
+                .streamId(1001)
+                .listener(metrics)
+                .build()
+);
+
+RpcMetricsSnapshot snapshot = metrics.snapshot();
+System.out.
+
+println(snapshot.callsStarted());
+        System.out.
+
+println(snapshot.callsSucceeded());
+        System.out.
+
+println(metrics.completedCalls());
+```
+
+## Current Scope
+
+This module intentionally stays simple:
+
+- in-memory counters
+- no dependency on Micrometer, Prometheus, or OpenTelemetry
+- no polling thread
+- no export backend
+
+That keeps it easy to adopt and safe to leave out of the hot profile.
+
+## Future Direction
+
+If needed later, this package can become the base for:
+
+- Micrometer integration
+- Prometheus-friendly exporters
+- OpenTelemetry metrics adapters
+
+without pushing those dependencies into the transport core.

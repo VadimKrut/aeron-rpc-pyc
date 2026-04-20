@@ -39,6 +39,7 @@ the business flow is naturally request/response.
 ### Maven via GitVerse
 
 ```xml
+
 <repositories>
     <repository>
         <id>gitverse</id>
@@ -47,11 +48,11 @@ the business flow is naturally request/response.
 </repositories>
 
 <dependencies>
-    <dependency>
-        <groupId>ru.pathcreator.pyc</groupId>
-        <artifactId>rpc-core</artifactId>
-        <version>0.0.9</version>
-    </dependency>
+<dependency>
+    <groupId>ru.pathcreator.pyc</groupId>
+    <artifactId>rpc-core</artifactId>
+    <version>0.1.0</version>
+</dependency>
 </dependencies>
 ```
 
@@ -61,6 +62,7 @@ GitHub Packages requires authentication even for reads. Add a token with
 `read:packages` to Maven `settings.xml`, then configure:
 
 ```xml
+
 <repositories>
     <repository>
         <id>github</id>
@@ -72,11 +74,11 @@ GitHub Packages requires authentication even for reads. Add a token with
 </repositories>
 
 <dependencies>
-    <dependency>
-        <groupId>ru.pathcreator.pyc</groupId>
-        <artifactId>rpc-core</artifactId>
-        <version>0.0.9</version>
-    </dependency>
+<dependency>
+    <groupId>ru.pathcreator.pyc</groupId>
+    <artifactId>rpc-core</artifactId>
+    <version>0.1.0</version>
+</dependency>
 </dependencies>
 ```
 
@@ -114,11 +116,16 @@ RpcChannel channel = node.channel(
 ```java
 channel.onRequest(
         1,
-        2,
-        new MyRequestCodec(),
-        new MyResponseCodec(),
-        request -> new MyResponse(request.id())
-);
+                2,
+                new MyRequestCodec(),
+        new
+
+MyResponseCodec(),
+
+request ->new
+
+MyResponse(request.id())
+        );
 ```
 
 ### Start and call
@@ -240,10 +247,28 @@ For deeper tuning guidance, see
 
 - [`docs/JAVA_EXAMPLES.md`](docs/JAVA_EXAMPLES.md) - copy-paste Java setup and
   integration examples
+- [`docs/SERVICE_REGISTRY.md`](docs/SERVICE_REGISTRY.md) - optional startup-time
+  method registry, validation, and schema report layer
+- [`docs/METRICS_MODULE.md`](docs/METRICS_MODULE.md) - optional listener-based
+  metrics layer that stays outside `rpc.core`
 - [`docs/CHANNEL_TUNING.md`](docs/CHANNEL_TUNING.md) - what the important node
   and channel settings do, when to use them, and what they can cost
 - [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) - benchmark commands, methodology,
   and current benchmark notes
+- [`docs/PRODUCTION_GUIDE.md`](docs/PRODUCTION_GUIDE.md) - operational guidance,
+  deployment advice, and production rollout notes
+
+## Optional Layers Outside Core
+
+The project now keeps additional service-level layers in clearly separate
+places:
+
+- `ru.pathcreator.pyc.rpc.schema` - startup-time method registry and schema
+  reporting
+- `ru.pathcreator.pyc.rpc.metrics` - listener-based metrics collector
+
+That separation is intentional. The transport core stays small, while optional
+integration layers can evolve around it.
 
 ## Testing
 
