@@ -20,6 +20,10 @@ For startup-time channel and method inventory, validation, and reporting, see
 For listener-based counters outside the transport core, see
 [`METRICS_MODULE.md`](METRICS_MODULE.md).
 
+For release and benchmark hygiene, see
+[`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md) and
+[`PERFORMANCE_DISCIPLINE.md`](PERFORMANCE_DISCIPLINE.md).
+
 ## 1. Smallest Working Example
 
 ```java
@@ -162,12 +166,6 @@ public final class RecommendedProfileExample {
 
 You do not need one stream per method.
 
-A common layout is:
-
-- one channel
-- one stream
-- several request message types
-
 ```java
 server.onRequest(1,101,priceRequestCodec, priceResponseCodec, this::handlePrice);
 server.
@@ -178,20 +176,17 @@ server.
 onRequest(3,103,riskRequestCodec, riskResponseCodec, this::handleRisk);
 ```
 
-Why this is safe:
+This is safe because:
 
 - routing uses request `messageTypeId`
 - responses are matched by correlation id
 - the caller also validates the expected response type
 
-Use separate channels or streams only when you want stronger isolation.
-
 ## 4. Optional Service Registry
 
-If the service has enough methods that you want startup-time validation and a
-readable inventory, use the optional registry layer above `RpcMethod`:
-
 ```java
+import java.nio.file.Path;
+
 import ru.pathcreator.pyc.rpc.core.ChannelConfig;
 import ru.pathcreator.pyc.rpc.core.RpcMethod;
 import ru.pathcreator.pyc.rpc.schema.RpcServiceRegistry;
@@ -238,16 +233,24 @@ RpcServiceRegistry registry = builder.build();
 System.out.
 
 println(registry.renderTextReport());
+        System.out.
+
+println(registry.renderJsonReport());
+        registry.
+
+writeTextReport(Path.of("build", "rpc-schema.txt"));
+        registry.
+
+writeJsonReport(Path.of("build", "rpc-schema.json"));
 ```
 
 This is a startup-time helper only. It does not change the transport call path.
 
 ## 5. Optional Metrics Layer
 
-If you want lightweight counters without pushing a metrics backend into the
-core transport, use the listener-based metrics package:
-
 ```java
+import java.nio.file.Path;
+
 import ru.pathcreator.pyc.rpc.core.ChannelConfig;
 import ru.pathcreator.pyc.rpc.core.RpcChannel;
 import ru.pathcreator.pyc.rpc.metrics.RpcMetricsListener;
@@ -277,7 +280,16 @@ println(snapshot.callsStarted());
 println(snapshot.callsSucceeded());
         System.out.
 
-println(metrics.completedCalls());
+println(snapshot.completedCalls());
+        System.out.
+
+println(snapshot.renderJsonReport());
+        metrics.
+
+writeTextReport(Path.of("build", "rpc-metrics.txt"));
+        metrics.
+
+writeJsonReport(Path.of("build", "rpc-metrics.json"));
 ```
 
 This layer is optional and remains outside `rpc.core`.
@@ -285,8 +297,6 @@ This layer is optional and remains outside `rpc.core`.
 ## 6. Handler Modes
 
 ### `OFFLOAD`
-
-Best default for real services.
 
 ```java
 channel.onRequest(
@@ -300,16 +310,10 @@ handle(request)
 );
 ```
 
-Use it when handlers may do:
-
-- database access
-- filesystem work
-- HTTP or gRPC clients
-- any non-trivial business logic
+Use it when handlers may do real work such as database calls, filesystem work,
+HTTP clients, or non-trivial business logic.
 
 ### `DIRECT`
-
-Use only when the handler is extremely small and predictable.
 
 ```java
 RpcChannel channel = node.channel(
@@ -322,42 +326,27 @@ RpcChannel channel = node.channel(
 );
 ```
 
-This removes offload scheduling and copy overhead, but a slow handler blocks
-receive progress.
+Use `DIRECT_EXECUTOR` only for extremely small predictable handlers.
 
 ## 7. Reconnect Modes
 
-### Fail fast
-
 ```java
-ChannelConfig config = ChannelConfig.builder()
+ChannelConfig failFast = ChannelConfig.builder()
         .localEndpoint("127.0.0.1:40101")
         .remoteEndpoint("127.0.0.1:40102")
         .streamId(1001)
         .reconnectStrategy(ReconnectStrategy.FAIL_FAST)
         .build();
-```
 
-Use this when the caller should immediately handle the failure.
-
-### Wait for connection
-
-```java
-ChannelConfig config = ChannelConfig.builder()
+ChannelConfig waitForConnection = ChannelConfig.builder()
         .localEndpoint("127.0.0.1:40101")
         .remoteEndpoint("127.0.0.1:40102")
         .streamId(1001)
         .defaultTimeout(Duration.ofSeconds(2))
         .reconnectStrategy(ReconnectStrategy.WAIT_FOR_CONNECTION)
         .build();
-```
 
-Use this when short disconnects are acceptable.
-
-### Recreate on disconnect
-
-```java
-ChannelConfig config = ChannelConfig.builder()
+ChannelConfig recreate = ChannelConfig.builder()
         .localEndpoint("127.0.0.1:40101")
         .remoteEndpoint("127.0.0.1:40102")
         .streamId(1001)
@@ -365,13 +354,7 @@ ChannelConfig config = ChannelConfig.builder()
         .build();
 ```
 
-Use this only when you need stronger recovery behavior than simply waiting for
-the current path to reconnect.
-
 ## 8. Many Channels On One Driver
-
-This is the recommended layout when your application has several independent
-logical connections.
 
 ```java
 RpcNode node = RpcNode.start(
@@ -399,21 +382,10 @@ RpcChannel orders = node.channel(
                 .build()
 );
 
-RpcChannel referenceData = node.channel(
-        ChannelConfig.builder()
-                .localEndpoint("10.10.0.11:41003")
-                .remoteEndpoint("10.10.0.12:41003")
-                .streamId(41003)
-                .build()
-);
-
 marketData.
 
 start();
 orders.
-
-start();
-referenceData.
 
 start();
 ```
@@ -422,9 +394,6 @@ In practice, several channels usually scale better than pushing many callers
 through one channel.
 
 ## 9. Several Caller Threads On One Channel
-
-This is supported and safe, but it usually scales worse than spreading the
-traffic across several channels.
 
 ```java
 RpcChannel sharedChannel = node.channel(
@@ -446,26 +415,15 @@ start();
 
 ## 10. Embedded Driver Vs External Driver
 
-### Embedded driver
-
-Simple for local apps, tests, and standalone services.
-
 ```java
-RpcNode node = RpcNode.start(
+RpcNode embedded = RpcNode.start(
         NodeConfig.builder()
                 .aeronDir("/tmp/rpc-core-demo")
                 .embeddedDriver(true)
                 .build()
 );
-```
 
-### External driver
-
-Better when you already run a dedicated `MediaDriver` and want multiple
-processes to share it.
-
-```java
-RpcNode node = RpcNode.start(
+RpcNode external = RpcNode.start(
         NodeConfig.builder()
                 .aeronDir("/dev/shm/aeron-your-driver")
                 .embeddedDriver(false)
@@ -474,10 +432,6 @@ RpcNode node = RpcNode.start(
 ```
 
 ## 11. Backpressure Policy
-
-### `BLOCK`
-
-Default and usually the right choice for synchronous RPC.
 
 ```java
 channel.call(
@@ -490,14 +444,10 @@ channel.call(
 
 BackpressurePolicy.BLOCK
 );
-```
 
-### `FAIL_FAST`
+        channel.
 
-Use this when the caller should immediately fall back or abort.
-
-```java
-channel.call(
+call(
         1,
                 2,
         request,
@@ -522,12 +472,6 @@ That means:
   separate transfer path
 
 ## 13. Remote Errors
-
-If a server-side handler fails, the caller receives a structured
-`RemoteRpcException` instead of waiting until timeout.
-
-Built-in transport statuses use HTTP-like numeric codes, and application code
-can raise its own business errors:
 
 ```java
 import ru.pathcreator.pyc.rpc.core.exceptions.RpcApplicationException;
@@ -568,23 +512,15 @@ Recommended convention:
 
 ## 14. Optional Compatibility And Observability Features
 
-Recent `0.1.0` work added optional service-level features above the core fast
-path:
+Service-level features above the core fast path include:
 
 - protocol handshake
 - channel listeners
 - reconnect recreation
 - drain mode
 
-Important guidance:
-
-- keep them off if you want the smallest possible profile
-- enable them when you need the behavior
-- recent clean steady-state benchmark runs show that these features are now
-  close to noise when enabled one at a time
-
-For the benchmark commands and current measurements, see
-[`BENCHMARKS.md`](BENCHMARKS.md).
+Keep them off if you want the smallest possible profile, and turn them on only
+when you need the behavior.
 
 ## 15. Validation
 

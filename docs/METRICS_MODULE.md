@@ -18,7 +18,6 @@ It records:
 - drain lifecycle events
 - reconnect attempt/success/failure
 - protocol handshake start/success/failure
-- aggregate completed local calls through `completedCalls()`
 
 ## Why It Lives Outside `rpc.core`
 
@@ -31,9 +30,10 @@ When no listeners are configured, the transport stays on the leanest path.
 ## Example
 
 ```java
+import java.nio.file.Path;
+
 import ru.pathcreator.pyc.rpc.core.ChannelConfig;
 import ru.pathcreator.pyc.rpc.core.RpcChannel;
-import ru.pathcreator.pyc.rpc.core.RpcNode;
 import ru.pathcreator.pyc.rpc.metrics.RpcMetricsListener;
 import ru.pathcreator.pyc.rpc.metrics.RpcMetricsSnapshot;
 
@@ -48,6 +48,10 @@ RpcChannel channel = node.channel(
                 .build()
 );
 
+channel.
+
+start();
+
 RpcMetricsSnapshot snapshot = metrics.snapshot();
 System.out.
 
@@ -57,7 +61,41 @@ println(snapshot.callsStarted());
 println(snapshot.callsSucceeded());
         System.out.
 
-println(metrics.completedCalls());
+println(snapshot.completedCalls());
+        System.out.
+
+println(snapshot.renderJsonReport());
+
+        metrics.
+
+writeTextReport(Path.of("build", "rpc-metrics.txt"));
+        metrics.
+
+writeJsonReport(Path.of("build", "rpc-metrics.json"));
+```
+
+## Snapshot Helpers
+
+`RpcMetricsSnapshot` provides convenience helpers:
+
+- `completedCalls()`
+- `isEmpty()`
+- `deltaSince(...)`
+- `renderTextReport()`
+- `renderJsonReport()`
+
+Example:
+
+```java
+RpcMetricsSnapshot before = metrics.snapshot();
+
+// traffic happens
+
+RpcMetricsSnapshot after = metrics.snapshot();
+RpcMetricsSnapshot delta = after.deltaSince(before);
+System.out.
+
+println(delta.renderTextReport());
 ```
 
 ## Current Scope
@@ -70,13 +108,3 @@ This module intentionally stays simple:
 - no export backend
 
 That keeps it easy to adopt and safe to leave out of the hot profile.
-
-## Future Direction
-
-If needed later, this package can become the base for:
-
-- Micrometer integration
-- Prometheus-friendly exporters
-- OpenTelemetry metrics adapters
-
-without pushing those dependencies into the transport core.

@@ -5,6 +5,9 @@ import ru.pathcreator.pyc.rpc.core.RpcChannel;
 import ru.pathcreator.pyc.rpc.core.RpcChannelListener;
 import ru.pathcreator.pyc.rpc.core.exceptions.RpcException;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
@@ -182,5 +185,43 @@ public final class RpcMetricsListener implements RpcChannelListener {
      */
     public long completedCalls() {
         return callsSucceeded.sum() + callsTimedOut.sum() + callsFailed.sum();
+    }
+
+    /**
+     * Returns the current snapshot and resets all counters afterwards.
+     *
+     * @return snapshot collected before reset
+     */
+    public RpcMetricsSnapshot snapshotAndReset() {
+        final RpcMetricsSnapshot snapshot = snapshot();
+        reset();
+        return snapshot;
+    }
+
+    /**
+     * Writes the current text report to the provided file path.
+     *
+     * @param path destination file path
+     * @throws IOException when the report cannot be written
+     */
+    public void writeTextReport(final Path path) throws IOException {
+        write(path, snapshot().renderTextReport());
+    }
+
+    /**
+     * Writes the current JSON report to the provided file path.
+     *
+     * @param path destination file path
+     * @throws IOException when the report cannot be written
+     */
+    public void writeJsonReport(final Path path) throws IOException {
+        write(path, snapshot().renderJsonReport());
+    }
+
+    private static void write(final Path path, final String content) throws IOException {
+        if (path.getParent() != null) {
+            Files.createDirectories(path.getParent());
+        }
+        Files.writeString(path, content);
     }
 }

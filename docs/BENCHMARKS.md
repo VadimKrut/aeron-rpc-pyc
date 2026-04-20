@@ -361,3 +361,7 @@ and
 ```bash
 mvn -Pbenchmarks -DskipTests package
 ```
+
+For a release-oriented benchmark sanity process, see
+[`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md) and
+[`PERFORMANCE_DISCIPLINE.md`](PERFORMANCE_DISCIPLINE.md).

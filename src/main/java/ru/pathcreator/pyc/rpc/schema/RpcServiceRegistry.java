@@ -2,7 +2,11 @@ package ru.pathcreator.pyc.rpc.schema;
 
 import ru.pathcreator.pyc.rpc.core.ChannelConfig;
 import ru.pathcreator.pyc.rpc.core.RpcMethod;
+import ru.pathcreator.pyc.rpc.core.envelope.Envelope;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.*;
 
 /**
@@ -62,16 +66,82 @@ public final class RpcServiceRegistry {
     }
 
     /**
+     * Performs non-fatal startup-time analysis and returns advisory issues that
+     * may still be worth reviewing before a service starts taking traffic.
+     *
+     * @return immutable list of validation warnings
+     */
+    public List<RpcValidationIssue> analyze() {
+        final ArrayList<RpcValidationIssue> issues = new ArrayList<>();
+        final HashMap<String, String> transportOwners = new HashMap<>();
+
+        for (final RpcChannelSchema channel : channels) {
+            final ChannelConfig config = channel.config();
+
+            if (channel.methods().isEmpty()) {
+                issues.add(new RpcValidationIssue(
+                        "empty-channel",
+                        "channel '" + channel.name() + "' has no registered methods"));
+            }
+
+            if (config.localEndpoint().equals(config.remoteEndpoint())) {
+                issues.add(new RpcValidationIssue(
+                        "same-endpoint",
+                        "channel '" + channel.name() + "' uses the same local and remote endpoint: " + config.localEndpoint()));
+            }
+
+            final String transportKey = config.localEndpoint() + "|" + config.remoteEndpoint() + "|" + config.streamId() + "|" + config.sessionId();
+            final String previousTransportOwner = transportOwners.putIfAbsent(transportKey, channel.name());
+            if (previousTransportOwner != null) {
+                issues.add(new RpcValidationIssue(
+                        "duplicate-transport-layout",
+                        "channels '" + previousTransportOwner + "' and '" + channel.name() +
+                        "' share the same local/remote/stream/session layout"));
+            }
+
+            if (!config.protocolHandshakeEnabled()) {
+                if (config.protocolVersion() != 1 || config.protocolCapabilities() != 0L || config.requiredRemoteCapabilities() != 0L) {
+                    issues.add(new RpcValidationIssue(
+                            "handshake-disabled-custom-protocol",
+                            "channel '" + channel.name() + "' sets protocol version/capabilities while protocol handshake is disabled"));
+                }
+            }
+
+            if (config.heartbeatInterval().compareTo(config.defaultTimeout()) >= 0) {
+                issues.add(new RpcValidationIssue(
+                        "heartbeat-vs-timeout",
+                        "channel '" + channel.name() + "' has heartbeatInterval >= defaultTimeout, which may delay channel-down detection relative to call timeout"));
+            }
+
+            if (config.offerTimeout().compareTo(config.defaultTimeout()) > 0) {
+                issues.add(new RpcValidationIssue(
+                        "offer-timeout-longer-than-call-timeout",
+                        "channel '" + channel.name() + "' has offerTimeout > defaultTimeout"));
+            }
+
+            if (config.pendingPoolCapacity() < channel.methods().size()) {
+                issues.add(new RpcValidationIssue(
+                        "small-pending-pool",
+                        "channel '" + channel.name() + "' has pendingPoolCapacity smaller than method count"));
+            }
+        }
+
+        return List.copyOf(issues);
+    }
+
+    /**
      * Renders a readable multi-line report for logs, startup diagnostics, or
      * deployment review.
      *
      * @return human-readable registry report
      */
     public String renderTextReport() {
+        final List<RpcValidationIssue> issues = analyze();
         final StringBuilder sb = new StringBuilder(512);
         sb.append("rpc-core service registry").append(System.lineSeparator());
         sb.append("Channels: ").append(channelCount()).append(System.lineSeparator());
         sb.append("Methods: ").append(methodCount()).append(System.lineSeparator());
+        sb.append("Warnings: ").append(issues.size()).append(System.lineSeparator());
         sb.append(System.lineSeparator());
 
         for (final RpcChannelSchema channel : channels) {
@@ -106,7 +176,148 @@ public final class RpcServiceRegistry {
             sb.append(System.lineSeparator());
         }
 
+        if (!issues.isEmpty()) {
+            sb.append("Validation warnings").append(System.lineSeparator());
+            for (final RpcValidationIssue issue : issues) {
+                sb.append("  - ").append(issue.code()).append(": ").append(issue.message()).append(System.lineSeparator());
+            }
+        }
+
         return sb.toString();
+    }
+
+    /**
+     * Renders the registry as a compact JSON document suitable for logging,
+     * diagnostics, or writing to a file.
+     *
+     * @return JSON report
+     */
+    public String renderJsonReport() {
+        final List<RpcValidationIssue> issues = analyze();
+        final StringBuilder sb = new StringBuilder(768);
+        sb.append('{');
+        jsonField(sb, "name", "rpc-core service registry").append(',');
+        jsonField(sb, "channelCount", channelCount()).append(',');
+        jsonField(sb, "methodCount", methodCount()).append(',');
+        jsonField(sb, "warningCount", issues.size()).append(',');
+        sb.append("\"channels\":[");
+        for (int i = 0; i < channels.size(); i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            final RpcChannelSchema channel = channels.get(i);
+            final ChannelConfig config = channel.config();
+            sb.append('{');
+            jsonField(sb, "name", channel.name()).append(',');
+            jsonField(sb, "streamId", config.streamId()).append(',');
+            jsonField(sb, "sessionId", config.sessionId()).append(',');
+            jsonField(sb, "localEndpoint", config.localEndpoint()).append(',');
+            jsonField(sb, "remoteEndpoint", config.remoteEndpoint()).append(',');
+            jsonField(sb, "rxIdleStrategy", String.valueOf(config.rxIdleStrategy())).append(',');
+            jsonField(sb, "reconnectStrategy", String.valueOf(config.reconnectStrategy())).append(',');
+            jsonField(sb, "protocolHandshakeEnabled", config.protocolHandshakeEnabled()).append(',');
+            jsonField(sb, "protocolVersion", config.protocolVersion()).append(',');
+            jsonField(sb, "protocolCapabilitiesHex", "0x" + Long.toHexString(config.protocolCapabilities())).append(',');
+            jsonField(sb, "requiredRemoteCapabilitiesHex", "0x" + Long.toHexString(config.requiredRemoteCapabilities())).append(',');
+            jsonField(sb, "listenerCount", config.listeners().length).append(',');
+            sb.append("\"methods\":[");
+            for (int j = 0; j < channel.methods().size(); j++) {
+                if (j > 0) {
+                    sb.append(',');
+                }
+                final RpcMethodSchema method = channel.methods().get(j);
+                sb.append('{');
+                jsonField(sb, "name", method.name()).append(',');
+                jsonField(sb, "requestMessageTypeId", method.requestMessageTypeId()).append(',');
+                jsonField(sb, "responseMessageTypeId", method.responseMessageTypeId()).append(',');
+                jsonField(sb, "requestType", method.requestTypeName()).append(',');
+                jsonField(sb, "responseType", method.responseTypeName());
+                if (method.version() != null) {
+                    sb.append(',');
+                    jsonField(sb, "version", method.version());
+                }
+                if (method.description() != null) {
+                    sb.append(',');
+                    jsonField(sb, "description", method.description());
+                }
+                sb.append('}');
+            }
+            sb.append("]}");
+        }
+        sb.append("],\"warnings\":[");
+        for (int i = 0; i < issues.size(); i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            final RpcValidationIssue issue = issues.get(i);
+            sb.append('{');
+            jsonField(sb, "code", issue.code()).append(',');
+            jsonField(sb, "message", issue.message());
+            sb.append('}');
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
+    /**
+     * Writes the text report to the provided file path, creating parent
+     * directories when needed.
+     *
+     * @param path destination file path
+     * @throws IOException when the report cannot be written
+     */
+    public void writeTextReport(final Path path) throws IOException {
+        write(path, renderTextReport());
+    }
+
+    /**
+     * Writes the JSON report to the provided file path, creating parent
+     * directories when needed.
+     *
+     * @param path destination file path
+     * @throws IOException when the report cannot be written
+     */
+    public void writeJsonReport(final Path path) throws IOException {
+        write(path, renderJsonReport());
+    }
+
+    private static void write(final Path path, final String content) throws IOException {
+        if (path.getParent() != null) {
+            Files.createDirectories(path.getParent());
+        }
+        Files.writeString(path, content);
+    }
+
+    private static StringBuilder jsonField(final StringBuilder sb, final String name, final String value) {
+        return sb.append('"').append(escapeJson(name)).append("\":\"").append(escapeJson(value)).append('"');
+    }
+
+    private static StringBuilder jsonField(final StringBuilder sb, final String name, final int value) {
+        return sb.append('"').append(escapeJson(name)).append("\":").append(value);
+    }
+
+    private static StringBuilder jsonField(final StringBuilder sb, final String name, final long value) {
+        return sb.append('"').append(escapeJson(name)).append("\":").append(value);
+    }
+
+    private static StringBuilder jsonField(final StringBuilder sb, final String name, final boolean value) {
+        return sb.append('"').append(escapeJson(name)).append("\":").append(value);
+    }
+
+    private static String escapeJson(final String value) {
+        final StringBuilder escaped = new StringBuilder(value.length() + 8);
+        for (int i = 0; i < value.length(); i++) {
+            final char c = value.charAt(i);
+            switch (c) {
+                case '\\' -> escaped.append("\\\\");
+                case '"' -> escaped.append("\\\"");
+                case '\n' -> escaped.append("\\n");
+                case '\r' -> escaped.append("\\r");
+                case '\t' -> escaped.append("\\t");
+                default -> escaped.append(c);
+            }
+        }
+        return escaped.toString();
     }
 
     public static final class Builder {
@@ -128,6 +339,9 @@ public final class RpcServiceRegistry {
             }
             if (channels.containsKey(name)) {
                 throw new IllegalArgumentException("duplicate channel name: " + name);
+            }
+            if (config.streamId() < 1) {
+                throw new IllegalArgumentException("streamId must be >= 1 for channel '" + name + "'");
             }
             final ChannelBuilder builder = new ChannelBuilder(name, config);
             channels.put(name, builder);
@@ -217,6 +431,16 @@ public final class RpcServiceRegistry {
             if (requestMessageTypeId < 1) {
                 throw new IllegalArgumentException("requestMessageTypeId must be >= 1 for method '" + methodName + "'");
             }
+            final int responseMessageTypeId = method.responseMessageTypeId();
+            if (responseMessageTypeId < 1) {
+                throw new IllegalArgumentException("responseMessageTypeId must be >= 1 for method '" + methodName + "'");
+            }
+            if (requestMessageTypeId == Envelope.RESERVED_HEARTBEAT || requestMessageTypeId == Envelope.RESERVED_PROTOCOL_HANDSHAKE) {
+                throw new IllegalArgumentException("requestMessageTypeId uses a reserved transport id for method '" + methodName + "'");
+            }
+            if (responseMessageTypeId == Envelope.RESERVED_HEARTBEAT || responseMessageTypeId == Envelope.RESERVED_PROTOCOL_HANDSHAKE) {
+                throw new IllegalArgumentException("responseMessageTypeId uses a reserved transport id for method '" + methodName + "'");
+            }
             final String previousOwner = requestTypeOwners.putIfAbsent(requestMessageTypeId, methodName);
             if (previousOwner != null) {
                 throw new IllegalArgumentException(
@@ -254,6 +478,16 @@ public final class RpcServiceRegistry {
             final int requestMessageTypeId = method.requestMessageTypeId();
             if (requestMessageTypeId < 1) {
                 throw new IllegalArgumentException("requestMessageTypeId must be >= 1 for method '" + methodName + "'");
+            }
+            final int responseMessageTypeId = method.responseMessageTypeId();
+            if (responseMessageTypeId < 1) {
+                throw new IllegalArgumentException("responseMessageTypeId must be >= 1 for method '" + methodName + "'");
+            }
+            if (requestMessageTypeId == Envelope.RESERVED_HEARTBEAT || requestMessageTypeId == Envelope.RESERVED_PROTOCOL_HANDSHAKE) {
+                throw new IllegalArgumentException("requestMessageTypeId uses a reserved transport id for method '" + methodName + "'");
+            }
+            if (responseMessageTypeId == Envelope.RESERVED_HEARTBEAT || responseMessageTypeId == Envelope.RESERVED_PROTOCOL_HANDSHAKE) {
+                throw new IllegalArgumentException("responseMessageTypeId uses a reserved transport id for method '" + methodName + "'");
             }
             final String previousOwner = requestTypeOwners.putIfAbsent(requestMessageTypeId, methodName);
             if (previousOwner != null) {

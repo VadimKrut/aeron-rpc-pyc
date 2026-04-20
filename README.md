@@ -51,7 +51,7 @@ the business flow is naturally request/response.
 <dependency>
     <groupId>ru.pathcreator.pyc</groupId>
     <artifactId>rpc-core</artifactId>
-    <version>0.1.0</version>
+    <version>0.1.1</version>
 </dependency>
 </dependencies>
 ```
@@ -77,7 +77,7 @@ GitHub Packages requires authentication even for reads. Add a token with
 <dependency>
     <groupId>ru.pathcreator.pyc</groupId>
     <artifactId>rpc-core</artifactId>
-    <version>0.1.0</version>
+    <version>0.1.1</version>
 </dependency>
 </dependencies>
 ```
@@ -115,16 +115,11 @@ RpcChannel channel = node.channel(
 
 ```java
 channel.onRequest(
-        1,
+                1,
                 2,
                 new MyRequestCodec(),
-        new
-
-MyResponseCodec(),
-
-request ->new
-
-MyResponse(request.id())
+                new MyResponseCodec(),
+                request -> new MyResponse(request.id())
         );
 ```
 
@@ -197,17 +192,10 @@ Application code can return business-level errors by throwing
 
 ## Performance Model
 
-The core transport path is designed to stay ultra-fast by default. Newer
-service-level features such as listeners, protocol handshake, and reconnect
-recreation are optional and should only be enabled when you need them.
-
-After the recent steady-state benchmark cleanup:
-
-- disabled optional features keep the default path near the earlier baseline
-- enabled optional features are now close to noise in steady-state on our clean
-  WSL runs
-- first-contact handshake cost is intentionally excluded from steady-state
-  benchmarking and should be treated as startup/session work, not per-call work
+The core transport path is designed to stay ultra-fast by default. Service-level
+features such as listeners, protocol handshake, reconnect recreation, schema
+reporting, and metrics export are optional and should only be enabled when you
+need them.
 
 For the latest measured numbers and commands, see
 [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
@@ -226,8 +214,6 @@ Important properties:
 - correlation safety is unchanged
 - one `Subscription` is never polled concurrently by multiple threads
 - empty RX lanes park instead of burning CPU
-
-This matters especially for workloads with many channels on one `MediaDriver`.
 
 ## Recommended Starting Point
 
@@ -248,7 +234,7 @@ For deeper tuning guidance, see
 - [`docs/JAVA_EXAMPLES.md`](docs/JAVA_EXAMPLES.md) - copy-paste Java setup and
   integration examples
 - [`docs/SERVICE_REGISTRY.md`](docs/SERVICE_REGISTRY.md) - optional startup-time
-  method registry, validation, and schema report layer
+  method registry, validation, warnings, and schema export layer
 - [`docs/METRICS_MODULE.md`](docs/METRICS_MODULE.md) - optional listener-based
   metrics layer that stays outside `rpc.core`
 - [`docs/CHANNEL_TUNING.md`](docs/CHANNEL_TUNING.md) - what the important node
@@ -257,15 +243,19 @@ For deeper tuning guidance, see
   and current benchmark notes
 - [`docs/PRODUCTION_GUIDE.md`](docs/PRODUCTION_GUIDE.md) - operational guidance,
   deployment advice, and production rollout notes
+- [`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md) - lightweight release
+  checklist for packaging, tagging, and publishing
+- [`docs/PERFORMANCE_DISCIPLINE.md`](docs/PERFORMANCE_DISCIPLINE.md) - how to
+  compare before/after changes without fooling yourself with noisy runs
 
 ## Optional Layers Outside Core
 
-The project now keeps additional service-level layers in clearly separate
-places:
+The project keeps additional service-level layers in clearly separate places:
 
-- `ru.pathcreator.pyc.rpc.schema` - startup-time method registry and schema
-  reporting
-- `ru.pathcreator.pyc.rpc.metrics` - listener-based metrics collector
+- `ru.pathcreator.pyc.rpc.schema` - startup-time method registry, warnings, and
+  schema reporting
+- `ru.pathcreator.pyc.rpc.metrics` - listener-based metrics collector and
+  snapshot reporting
 
 That separation is intentional. The transport core stays small, while optional
 integration layers can evolve around it.

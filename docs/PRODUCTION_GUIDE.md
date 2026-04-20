@@ -179,6 +179,9 @@ Before a service starts taking traffic:
 The optional service registry layer exists exactly for this kind of startup
 check.
 
+If the service is important enough to deserve repeatable startup review, export
+the schema report to both text and JSON as part of deployment preparation.
+
 ## 12. Shutdown Checklist
 
 For controlled shutdowns:
@@ -203,6 +206,9 @@ When you change config or behavior:
 
 For command templates and current observations, see
 [`BENCHMARKS.md`](BENCHMARKS.md).
+
+For repeatable before/after comparison rules, see
+[`PERFORMANCE_DISCIPLINE.md`](PERFORMANCE_DISCIPLINE.md).
 
 Useful recent reference points from clean WSL sanity runs:
 

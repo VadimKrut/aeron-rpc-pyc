@@ -1,7 +1,6 @@
 # Service Registry
 
-`rpc-core` now includes an optional startup-time registry layer above
-`RpcMethod`.
+`rpc-core` includes an optional startup-time registry layer above `RpcMethod`.
 
 Important design rule:
 
@@ -23,6 +22,7 @@ When a service grows, method definitions become easy to lose track of:
 - conflicting method names
 - unclear stream layout
 - unclear protocol version and capability settings per channel
+- suspicious startup config combinations that are not outright invalid
 
 The registry gives you a startup-time place to describe and validate the shape
 of the service before traffic begins.
@@ -35,16 +35,12 @@ of the service before traffic begins.
 - attach `RpcMethod` definitions to those channels
 - validate duplicate method names inside a channel
 - validate duplicate request message type ids inside a channel
+- reject reserved transport message type ids
 - count channels and methods
-- render a readable text report of:
-    - channels
-    - streams
-    - endpoints
-    - reconnect mode
-    - protocol handshake settings
-    - protocol version and capabilities
-    - listener count
-    - methods and their request/response ids
+- analyze suspicious startup config combinations
+- render readable text reports
+- render machine-readable JSON reports
+- write those reports to disk
 
 ## What It Does Not Do
 
@@ -60,10 +56,12 @@ It is intentionally a startup-time helper.
 ## Minimal Example
 
 ```java
+import java.nio.file.Path;
+
 import ru.pathcreator.pyc.rpc.core.ChannelConfig;
 import ru.pathcreator.pyc.rpc.core.RpcMethod;
-import ru.pathcreator.pyc.rpc.core.codec.MessageCodec;
 import ru.pathcreator.pyc.rpc.schema.RpcServiceRegistry;
+import ru.pathcreator.pyc.rpc.schema.RpcValidationIssue;
 
 RpcMethod<OrderRequest, OrderResponse> placeOrder =
         RpcMethod.of(10, 110, orderRequestCodec, orderResponseCodec);
@@ -71,35 +69,76 @@ RpcMethod<OrderRequest, OrderResponse> placeOrder =
 RpcMethod<RiskRequest, RiskResponse> checkRisk =
         RpcMethod.of(11, 111, riskRequestCodec, riskResponseCodec);
 
-RpcServiceRegistry registry = RpcServiceRegistry.builder()
-        .channel("orders", ChannelConfig.builder()
-                .localEndpoint("10.10.0.11:40101")
-                .remoteEndpoint("10.10.0.12:40101")
-                .streamId(2001)
-                .protocolHandshakeEnabled(true)
-                .protocolVersion(2)
-                .protocolCapabilities(0b101L)
-                .build())
-        .method("place-order", placeOrder, OrderRequest.class, OrderResponse.class, "v2", "main order entry path")
-        .method("check-risk", checkRisk, RiskRequest.class, RiskResponse.class)
-        .build();
+RpcServiceRegistry.Builder builder = RpcServiceRegistry.builder();
+builder.
+
+channel(
+                "orders",
+                ChannelConfig.builder()
+                        .
+
+localEndpoint("10.10.0.11:40101")
+                        .
+
+remoteEndpoint("10.10.0.12:40101")
+                        .
+
+streamId(2001)
+                        .
+
+protocolHandshakeEnabled(true)
+                        .
+
+protocolVersion(2)
+                        .
+
+protocolCapabilities(0b101L)
+                        .
+
+build()
+        )
+                .
+
+method("place-order",placeOrder, OrderRequest .class, OrderResponse .class, "v2","main order entry path")
+        .
+
+method("check-risk",checkRisk, RiskRequest .class, RiskResponse .class);
+
+RpcServiceRegistry registry = builder.build();
 
 System.out.
 
 println(registry.renderTextReport());
+        System.out.
+
+println(registry.renderJsonReport());
+
+        for(
+RpcValidationIssue issue :registry.
+
+analyze()){
+        System.out.
+
+println(issue.code() +": "+issue.
+
+message());
+        }
+
+        registry.
+
+writeTextReport(Path.of("build", "rpc-schema.txt"));
+        registry.
+
+writeJsonReport(Path.of("build", "rpc-schema.json"));
 ```
 
-## Typical Report
-
-The rendered report is intended to be easy to read during startup logs or
-deployment checks.
-
-Example shape:
+## Typical Text Report
 
 ```text
 rpc-core service registry
 Channels: 1
 Methods: 2
+Warnings: 0
 
 Channel: orders
   Stream: 2001
@@ -117,6 +156,19 @@ Channel: orders
     - check-risk [req=11, resp=111, requestType=com.example.RiskRequest, responseType=com.example.RiskResponse]
 ```
 
+## Typical Warning Examples
+
+`analyze()` returns non-fatal warnings that are still worth reviewing before
+rollout.
+
+Current examples include:
+
+- same local and remote endpoint
+- custom protocol settings while handshake is disabled
+- `offerTimeout` longer than `defaultTimeout`
+- very small pending pool relative to method count
+- duplicate transport layout across logical channels
+
 ## Recommended Use
 
 Use this layer when:
@@ -125,6 +177,7 @@ Use this layer when:
 - you want startup-time conflict detection
 - you want a readable inventory of the service shape
 - you want logs or deployment tooling to see channels, streams, and method ids
+- you want repeatable text/JSON startup artifacts
 
 ## Performance Note
 
@@ -134,4 +187,5 @@ traffic.
 It should not be used as an extra per-call dispatch layer, and it is not
 designed to change `RpcChannel.call(...)` behavior.
 
-That is why it lives outside `rpc.core` and only holds metadata and validation.
+That is why it lives outside `rpc.core` and only holds metadata, validation,
+and reporting.

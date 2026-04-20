@@ -6,7 +6,10 @@ import ru.pathcreator.pyc.rpc.core.exceptions.RemoteRpcException;
 import ru.pathcreator.pyc.rpc.core.exceptions.RpcStatus;
 import ru.pathcreator.pyc.rpc.core.exceptions.RpcTimeoutException;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+import static org.junit.jupiter.api.Assertions.*;
 
 class RpcMetricsListenerTest {
 
@@ -47,6 +50,9 @@ class RpcMetricsListenerTest {
         assertEquals(1, snapshot.protocolHandshakeStarts());
         assertEquals(1, snapshot.protocolHandshakeSuccesses());
         assertEquals(1, snapshot.protocolHandshakeFailures());
+        assertFalse(snapshot.isEmpty());
+        assertTrue(snapshot.renderTextReport().contains("completedCalls: 3"));
+        assertTrue(snapshot.renderJsonReport().contains("\"completedCalls\":3"));
     }
 
     @Test
@@ -58,5 +64,34 @@ class RpcMetricsListenerTest {
 
         assertEquals(0, listener.snapshot().callsStarted());
         assertEquals(0, listener.completedCalls());
+    }
+
+    @Test
+    void supportsDeltaSnapshotAndFileExport() throws Exception {
+        final RpcMetricsListener listener = new RpcMetricsListener();
+        final RpcMetricsSnapshot baseline = listener.snapshot();
+
+        listener.onCallStarted(null, 1, 1L);
+        listener.onCallSucceeded(null, 1, 1L);
+        listener.onRemoteError(null, 2, 2L, new RemoteRpcException(RpcStatus.BAD_REQUEST.code(), "bad"));
+
+        final RpcMetricsSnapshot delta = listener.snapshot().deltaSince(baseline);
+        assertEquals(1, delta.callsStarted());
+        assertEquals(1, delta.callsSucceeded());
+        assertEquals(1, delta.remoteErrors());
+        assertEquals(1, delta.completedCalls());
+
+        final Path tempDir = Files.createTempDirectory("rpc-metrics-report");
+        final Path textPath = tempDir.resolve("metrics.txt");
+        final Path jsonPath = tempDir.resolve("metrics.json");
+        listener.writeTextReport(textPath);
+        listener.writeJsonReport(jsonPath);
+
+        assertTrue(Files.readString(textPath).contains("rpc-core metrics snapshot"));
+        assertTrue(Files.readString(jsonPath).contains("\"callsStarted\":1"));
+
+        final RpcMetricsSnapshot snapshotAndReset = listener.snapshotAndReset();
+        assertEquals(1, snapshotAndReset.callsStarted());
+        assertTrue(listener.snapshot().isEmpty());
     }
 }
