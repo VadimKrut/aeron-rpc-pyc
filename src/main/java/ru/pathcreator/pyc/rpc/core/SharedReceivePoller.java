@@ -13,13 +13,29 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
 
 /**
- * Node-level shared receive poller for {@link RpcChannel} instances.
+ * Общий node-level RX poller для {@link RpcChannel}.
+ *
+ * <p>Shared node-level receive poller for {@link RpcChannel} instances.</p>
+ *
+ * <p>Пуллер группирует каналы по {@link IdleStrategyKind}. У каждой группы есть
+ * настраиваемое число lane-ов. Один lane — это долгоживущий поток, который
+ * обходит назначенные ему каналы и вызывает {@link RpcChannel#pollRx(int)}.
+ * Это позволяет сохранить изоляцию состояния канала, но не держать отдельный
+ * RX-thread на каждый канал.</p>
  *
  * <p>The poller groups channels by {@link IdleStrategyKind}. Each group owns a
  * configurable number of polling lanes. A lane is a long-lived thread that
  * iterates over its assigned channels and calls {@link RpcChannel#pollRx(int)}.
  * This keeps channel state isolated while avoiding one dedicated RX thread per
  * channel.</p>
+ *
+ * <p>Ключевые свойства:</p>
+ * <ul>
+ *   <li>одна subscription одного канала никогда не poll-ится конкурентно из
+ *       нескольких потоков</li>
+ *   <li>канал назначается в наименее загруженный lane своей idle-группы</li>
+ *   <li>пустые lane-ы паркуются вместо busy loop, чтобы не жечь CPU зря</li>
+ * </ul>
  *
  * <p>Important properties:</p>
  * <ul>
@@ -30,16 +46,21 @@ import java.util.concurrent.locks.LockSupport;
  * </ul>
  */
 final class SharedReceivePoller implements AutoCloseable {
-    private final EnumMap<IdleStrategyKind, LaneGroup> groups = new EnumMap<>(IdleStrategyKind.class);
-    private final AtomicBoolean closed = new AtomicBoolean(false);
+
     private final int lanesPerKind;
     private final int fragmentLimit;
+    private final EnumMap<IdleStrategyKind, LaneGroup> groups = new EnumMap<>(IdleStrategyKind.class);
+    private final AtomicBoolean closed = new AtomicBoolean(false);
 
     /**
-     * Creates a shared receive poller.
+     * Создаёт общий RX poller.
      *
-     * @param lanesPerKind  number of poller lanes per {@link IdleStrategyKind}
-     * @param fragmentLimit fragment limit used by each lane on every poll pass
+     * <p>Creates a shared receive poller.</p>
+     *
+     * @param lanesPerKind  число lane-ов на каждый {@link IdleStrategyKind} /
+     *                      number of poller lanes per {@link IdleStrategyKind}
+     * @param fragmentLimit лимит fragments на один poll pass lane-а /
+     *                      fragment limit used by each lane on every poll pass
      */
     SharedReceivePoller(final int lanesPerKind, final int fragmentLimit) {
         if (lanesPerKind < 1) {
@@ -53,9 +74,11 @@ final class SharedReceivePoller implements AutoCloseable {
     }
 
     /**
-     * Registers a channel into the lane group matching its idle strategy.
+     * Регистрирует канал в lane-группе, соответствующей его idle strategy.
      *
-     * @param channel channel to register
+     * <p>Registers a channel into the lane group matching its idle strategy.</p>
+     *
+     * @param channel канал для регистрации / channel to register
      */
     void register(final RpcChannel channel) {
         if (closed.get()) {
@@ -65,9 +88,11 @@ final class SharedReceivePoller implements AutoCloseable {
     }
 
     /**
-     * Removes a channel from the shared poller if it is currently registered.
+     * Удаляет канал из общего poller-а, если он сейчас зарегистрирован.
      *
-     * @param channel channel to unregister
+     * <p>Removes a channel from the shared poller if it is currently registered.</p>
+     *
+     * @param channel канал для удаления / channel to unregister
      */
     void unregister(final RpcChannel channel) {
         final LaneGroup group = groups.get(channel.rxIdleStrategyKind());
@@ -137,12 +162,17 @@ final class SharedReceivePoller implements AutoCloseable {
         }
 
         /**
-         * Picks the currently least-loaded lane.
+         * Выбирает наименее загруженный lane на данный момент.
+         *
+         * <p>Picks the currently least-loaded lane.</p>
+         *
+         * <p>{@code next} используется как стартовая позиция пробирования,
+         * чтобы при равной нагрузке не выбирать всегда lane {@code 0}.</p>
          *
          * <p>The {@code next} cursor is used as the initial probe position so
          * equal-size cases do not always prefer lane {@code 0}.</p>
          *
-         * @return index of the chosen lane
+         * @return индекс выбранного lane-а / index of the chosen lane
          */
         private int leastLoadedLane() {
             int bestIndex = Math.floorMod(next.get(), lanes.length);
@@ -190,7 +220,9 @@ final class SharedReceivePoller implements AutoCloseable {
         }
 
         /**
-         * Main polling loop for one shared lane.
+         * Главный polling loop одного общего lane-а.
+         *
+         * <p>Main polling loop for one shared lane.</p>
          */
         private void loop() {
             while (running.get()) {

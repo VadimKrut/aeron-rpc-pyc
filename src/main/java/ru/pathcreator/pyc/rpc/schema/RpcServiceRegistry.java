@@ -19,6 +19,7 @@ import java.util.*;
  * path.</p>
  */
 public final class RpcServiceRegistry {
+
     private final List<RpcChannelSchema> channels;
 
     private RpcServiceRegistry(final List<RpcChannelSchema> channels) {
@@ -320,8 +321,22 @@ public final class RpcServiceRegistry {
         return escaped.toString();
     }
 
+    /**
+     * Builder для сборки immutable registry снимка до старта сервиса.
+     *
+     * <p>Builder used to assemble an immutable registry snapshot before the
+     * service starts.</p>
+     */
     public static final class Builder {
         private final LinkedHashMap<String, ChannelBuilder> channels = new LinkedHashMap<>();
+
+        /**
+         * Создаёт пустой registry builder.
+         *
+         * <p>Creates an empty registry builder.</p>
+         */
+        private Builder() {
+        }
 
         /**
          * Adds a logical channel entry to the registry.
@@ -363,6 +378,11 @@ public final class RpcServiceRegistry {
         }
     }
 
+    /**
+     * Builder одной logical channel entry внутри registry.
+     *
+     * <p>Builder for one logical channel entry inside the registry.</p>
+     */
     public static final class ChannelBuilder {
         private final String name;
         private final ChannelConfig config;

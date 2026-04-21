@@ -3,19 +3,25 @@ package ru.pathcreator.pyc.rpc.schema;
 import ru.pathcreator.pyc.rpc.core.RpcMethod;
 
 /**
- * Startup-time method metadata used by {@link RpcServiceRegistry}.
+ * Startup-time metadata одного метода, используемая в {@link RpcServiceRegistry}.
+ *
+ * <p>Startup-time method metadata used by {@link RpcServiceRegistry}.</p>
+ *
+ * <p>Класс существует только для validation, reporting и schema-like анализа
+ * до старта нагрузки. В hot path транспорта он не участвует.</p>
  *
  * <p>This class exists purely for validation, reporting, and schema-like
  * analysis before a service starts accepting load. It does not participate in
  * the transport hot path.</p>
  */
 public final class RpcMethodSchema {
+
     private final String name;
+    private final String version;
+    private final String description;
     private final RpcMethod<?, ?> method;
     private final String requestTypeName;
     private final String responseTypeName;
-    private final String version;
-    private final String description;
 
     RpcMethodSchema(
             final String name,
@@ -34,7 +40,9 @@ public final class RpcMethodSchema {
     }
 
     /**
-     * Returns the logical method name used in the registry.
+     * Возвращает логическое имя метода в registry.
+     *
+     * <p>Returns the logical method name used in the registry.</p>
      *
      * @return logical method name
      */
@@ -43,16 +51,20 @@ public final class RpcMethodSchema {
     }
 
     /**
-     * Returns the underlying typed RPC method definition.
+     * Возвращает underlying typed RPC method descriptor.
      *
-     * @return typed method descriptor
+     * <p>Returns the underlying typed RPC method definition.</p>
+     *
+     * @return underlying method descriptor
      */
     public RpcMethod<?, ?> method() {
         return method;
     }
 
     /**
-     * Returns the request message type id.
+     * Возвращает request message type id.
+     *
+     * <p>Returns the request message type id.</p>
      *
      * @return request message type id
      */
@@ -61,7 +73,9 @@ public final class RpcMethodSchema {
     }
 
     /**
-     * Returns the response message type id.
+     * Возвращает response message type id.
+     *
+     * <p>Returns the response message type id.</p>
      *
      * @return response message type id
      */
@@ -70,36 +84,44 @@ public final class RpcMethodSchema {
     }
 
     /**
-     * Returns the request Java type name when supplied to the registry.
+     * Возвращает имя Java-типа запроса, если оно было передано в registry.
      *
-     * @return request type name
+     * <p>Returns the request Java type name when supplied to the registry.</p>
+     *
+     * @return request Java type name
      */
     public String requestTypeName() {
         return requestTypeName;
     }
 
     /**
-     * Returns the response Java type name when supplied to the registry.
+     * Возвращает имя Java-типа ответа, если оно было передано в registry.
      *
-     * @return response type name
+     * <p>Returns the response Java type name when supplied to the registry.</p>
+     *
+     * @return response Java type name
      */
     public String responseTypeName() {
         return responseTypeName;
     }
 
     /**
-     * Returns the optional logical method version.
+     * Возвращает optional logical version метода.
      *
-     * @return method version, or {@code null} when not supplied
+     * <p>Returns the optional logical method version.</p>
+     *
+     * @return logical method version or {@code null}
      */
     public String version() {
         return version;
     }
 
     /**
-     * Returns the optional human-readable method description.
+     * Возвращает optional human-readable описание метода.
      *
-     * @return description, or {@code null} when not supplied
+     * <p>Returns the optional human-readable method description.</p>
+     *
+     * @return method description or {@code null}
      */
     public String description() {
         return description;

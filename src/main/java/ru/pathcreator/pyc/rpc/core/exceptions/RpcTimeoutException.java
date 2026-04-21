@@ -1,34 +1,35 @@
 package ru.pathcreator.pyc.rpc.core.exceptions;
 
 /**
- * Исключение, которое сообщает, что RPC-вызов не завершился за отведенное время.
+ * Исключение, которое сообщает, что RPC-вызов не завершился в пределах timeout.
  *
- * <p>Исключение содержит идентификатор корреляции исходного запроса и таймаут,
- * после которого ожидание ответа было прекращено. Эти значения полезны для
- * диагностики зависших или потерянных запросов.</p>
+ * <p>Exception indicating that an RPC call did not complete within the
+ * configured timeout.</p>
  *
- * <p>Exception indicating that an RPC call did not complete within the configured
- * timeout. It contains the original request correlation identifier and the timeout
- * used by the waiting code.</p>
+ * <p>Исключение содержит correlation id исходного запроса и timeout, после
+ * которого ожидание было прервано.</p>
+ *
+ * <p>The exception contains the correlation id of the original request and the
+ * timeout after which waiting was interrupted.</p>
  */
 public final class RpcTimeoutException extends RpcException {
     /**
-     * Идентификатор корреляции запроса, для которого истек таймаут.
+     * correlation id запроса, упавшего по timeout / correlation id of the timed-out request.
      */
     private final long correlationId;
 
     /**
-     * Таймаут ожидания в наносекундах.
+     * timeout ожидания в наносекундах / timeout value in nanoseconds.
      */
     private final long timeoutNs;
 
     /**
-     * Создает исключение с идентификатором корреляции и таймаутом ожидания.
+     * Создаёт timeout-исключение для конкретного correlation id.
      *
-     * <p>Creates an exception with the request correlation identifier and timeout.</p>
+     * <p>Creates a timeout exception for a specific correlation id.</p>
      *
-     * @param correlationId идентификатор корреляции запроса / request correlation identifier
-     * @param timeoutNs     таймаут ожидания в наносекундах / timeout in nanoseconds
+     * @param correlationId идентификатор корреляции / request correlation id
+     * @param timeoutNs     timeout ожидания в наносекундах / timeout in nanoseconds
      */
     public RpcTimeoutException(final long correlationId, final long timeoutNs) {
         super("RPC timeout after " + (timeoutNs / 1_000_000) + "ms, correlationId=" + correlationId);
@@ -37,22 +38,22 @@ public final class RpcTimeoutException extends RpcException {
     }
 
     /**
-     * Возвращает идентификатор корреляции запроса, для которого истек таймаут.
+     * Возвращает correlation id запроса, который завершился по timeout.
      *
-     * <p>Returns the correlation identifier of the request that timed out.</p>
+     * <p>Returns the correlation id of the request that timed out.</p>
      *
-     * @return идентификатор корреляции запроса / request correlation identifier
+     * @return timed-out request correlation id
      */
     public long correlationId() {
         return correlationId;
     }
 
     /**
-     * Возвращает таймаут ожидания, после которого вызов был прерван.
+     * Возвращает timeout ожидания в наносекундах.
      *
-     * <p>Returns the timeout after which the call was interrupted.</p>
+     * <p>Returns the timeout value in nanoseconds.</p>
      *
-     * @return таймаут в наносекундах / timeout in nanoseconds
+     * @return timeout value in nanoseconds
      */
     public long timeoutNs() {
         return timeoutNs;

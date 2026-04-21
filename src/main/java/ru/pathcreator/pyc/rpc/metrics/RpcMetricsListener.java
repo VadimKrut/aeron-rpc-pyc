@@ -11,7 +11,14 @@ import java.nio.file.Path;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * Ready-to-use listener-backed metrics collector for {@code rpc-core}.
+ * Готовый listener-backed collector простых метрик для {@code rpc-core}.
+ *
+ * <p>Ready-to-use listener-backed metrics collector for {@code rpc-core}.</p>
+ *
+ * <p>Этот класс живёт вне {@code rpc.core} и строится поверх optional
+ * {@link RpcChannelListener} API. Когда он не подключён, transport path не
+ * платит за него ничего. Когда подключён, он собирает простые счётчики,
+ * пригодные для логирования, отладки и дальнейшего экспорта.</p>
  *
  * <p>This class stays outside {@code rpc.core} and builds on top of the
  * optional {@link RpcChannelListener} API. When not configured, it has zero
@@ -20,6 +27,14 @@ import java.util.concurrent.atomic.LongAdder;
  * backend.</p>
  */
 public final class RpcMetricsListener implements RpcChannelListener {
+    /**
+     * Создаёт пустой metrics listener с нулевыми счётчиками.
+     *
+     * <p>Creates an empty metrics listener with all counters set to zero.</p>
+     */
+    public RpcMetricsListener() {
+    }
+
     private final LongAdder callsStarted = new LongAdder();
     private final LongAdder callsSucceeded = new LongAdder();
     private final LongAdder callsTimedOut = new LongAdder();
@@ -127,7 +142,9 @@ public final class RpcMetricsListener implements RpcChannelListener {
     }
 
     /**
-     * Returns a stable copy of the current counters.
+     * Возвращает стабильную snapshot-копию текущих счётчиков.
+     *
+     * <p>Returns a stable copy of the current counters.</p>
      *
      * @return immutable metrics snapshot
      */
@@ -152,7 +169,9 @@ public final class RpcMetricsListener implements RpcChannelListener {
     }
 
     /**
-     * Resets all counters to zero.
+     * Сбрасывает все счётчики в ноль.
+     *
+     * <p>Resets all counters to zero.</p>
      */
     public void reset() {
         callsStarted.reset();
@@ -173,8 +192,14 @@ public final class RpcMetricsListener implements RpcChannelListener {
     }
 
     /**
-     * Returns the total number of terminal call outcomes currently recorded by
-     * this listener.
+     * Возвращает суммарное число terminal local call outcome-ов.
+     *
+     * <p>Returns the total number of terminal call outcomes currently recorded by
+     * this listener.</p>
+     *
+     * <p>Это convenience aggregate над successful, timed-out и failed local
+     * calls. Remote errors остаются отдельным сигналом, потому что это уже
+     * завершившиеся remote response-ы, а не локальные transport failures.</p>
      *
      * <p>This is a convenience aggregate over successful, timed-out, and
      * failed local calls. Remote errors are kept as a separate signal because
@@ -188,9 +213,11 @@ public final class RpcMetricsListener implements RpcChannelListener {
     }
 
     /**
-     * Returns the current snapshot and resets all counters afterwards.
+     * Возвращает текущий snapshot и сразу сбрасывает все счётчики.
      *
-     * @return snapshot collected before reset
+     * <p>Returns the current snapshot and resets all counters afterwards.</p>
+     *
+     * @return immutable metrics snapshot captured before reset
      */
     public RpcMetricsSnapshot snapshotAndReset() {
         final RpcMetricsSnapshot snapshot = snapshot();
@@ -199,20 +226,24 @@ public final class RpcMetricsListener implements RpcChannelListener {
     }
 
     /**
-     * Writes the current text report to the provided file path.
+     * Пишет текущий text report в указанный файл.
      *
-     * @param path destination file path
-     * @throws IOException when the report cannot be written
+     * <p>Writes the current text report to the provided file path.</p>
+     *
+     * @param path путь назначения / destination file path
+     * @throws IOException если записать отчёт не удалось / when the report cannot be written
      */
     public void writeTextReport(final Path path) throws IOException {
         write(path, snapshot().renderTextReport());
     }
 
     /**
-     * Writes the current JSON report to the provided file path.
+     * Пишет текущий JSON report в указанный файл.
      *
-     * @param path destination file path
-     * @throws IOException when the report cannot be written
+     * <p>Writes the current JSON report to the provided file path.</p>
+     *
+     * @param path путь назначения / destination file path
+     * @throws IOException если записать отчёт не удалось / when the report cannot be written
      */
     public void writeJsonReport(final Path path) throws IOException {
         write(path, snapshot().renderJsonReport());

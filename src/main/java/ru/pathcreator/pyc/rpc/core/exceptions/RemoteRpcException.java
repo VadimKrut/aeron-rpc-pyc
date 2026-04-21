@@ -1,17 +1,25 @@
 package ru.pathcreator.pyc.rpc.core.exceptions;
 
 /**
- * Exception observed by the caller when the remote side returned a structured
- * error response.
+ * Исключение, которое наблюдает caller, когда другая сторона вернула
+ * structured remote error.
+ *
+ * <p>Exception observed by the caller when the remote side returned a
+ * structured error response.</p>
  */
 public final class RemoteRpcException extends RpcException {
+    /**
+     * remote status code, полученный от peer / remote status code returned by the peer.
+     */
     private final int statusCode;
 
     /**
-     * Creates a remote exception with the provided status code and message.
+     * Создаёт remote-исключение с кодом статуса и текстом ошибки.
      *
-     * @param statusCode remote status code
-     * @param message    remote error message
+     * <p>Creates a remote exception with the provided status code and message.</p>
+     *
+     * @param statusCode код статуса remote-side / remote status code
+     * @param message    remote сообщение об ошибке / remote error message
      */
     public RemoteRpcException(final int statusCode, final String message) {
         super("Remote RPC failed [" + statusCode + "]: " + message);
@@ -19,7 +27,9 @@ public final class RemoteRpcException extends RpcException {
     }
 
     /**
-     * Returns the remote status code.
+     * Возвращает числовой remote status code.
+     *
+     * <p>Returns the remote status code.</p>
      *
      * @return remote status code
      */
@@ -28,18 +38,23 @@ public final class RemoteRpcException extends RpcException {
     }
 
     /**
-     * Returns the known transport status for this code when available.
+     * Возвращает известный built-in статус для этого кода, если он есть.
      *
-     * @return enum value or {@code null} for custom application codes
+     * <p>Returns the known transport status for this code when available.</p>
+     *
+     * @return enum значение или {@code null} для custom application codes /
+     * enum value or {@code null} for custom application codes
      */
     public RpcStatus status() {
         return RpcStatus.fromCode(statusCode);
     }
 
     /**
-     * Returns whether the remote status is known to be retryable.
+     * Возвращает, считается ли remote status retryable.
      *
-     * @return {@code true} for retryable built-in statuses
+     * <p>Returns whether the remote status is known to be retryable.</p>
+     *
+     * @return {@code true} when the status is retryable
      */
     public boolean isRetryable() {
         final RpcStatus status = status();
@@ -47,9 +62,11 @@ public final class RemoteRpcException extends RpcException {
     }
 
     /**
-     * Returns whether the remote status belongs to the built-in client-error range.
+     * Возвращает, относится ли remote status к built-in client-error диапазону.
      *
-     * @return {@code true} when the remote status is a built-in client error
+     * <p>Returns whether the remote status belongs to the built-in client-error range.</p>
+     *
+     * @return {@code true} when the status is a client error
      */
     public boolean isClientError() {
         final RpcStatus status = status();
@@ -57,9 +74,11 @@ public final class RemoteRpcException extends RpcException {
     }
 
     /**
-     * Returns whether the remote status belongs to the built-in server-error range.
+     * Возвращает, относится ли remote status к built-in server-error диапазону.
      *
-     * @return {@code true} when the remote status is a built-in server error
+     * <p>Returns whether the remote status belongs to the built-in server-error range.</p>
+     *
+     * @return {@code true} when the status is a server error
      */
     public boolean isServerError() {
         final RpcStatus status = status();

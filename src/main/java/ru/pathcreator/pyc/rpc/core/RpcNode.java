@@ -12,39 +12,28 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Корневой объект RPC-слоя на один процесс.
- * <p>
- * Держит:
- * - один embedded MediaDriver (если NodeConfig.embeddedDriver == true),
- * - одного Aeron-клиента,
- * - один virtual-thread Executor для OFFLOAD-handler-ов (шарится между каналами),
- * - список открытых каналов (для централизованного close()).
- * <p>
- * Использование:
- * <p>
- * RpcNode node = RpcNode.start(NodeConfig.builder().aeronDir("...").build());
- * <p>
- * RpcChannel ch = node.channel(ChannelConfig.builder()
- * .localEndpoint("localhost:40101")
- * .remoteEndpoint("localhost:40102")
- * .streamId(1001)
- * .build());
- * <p>
- * // регистрируем handlers ...
- * ch.start();
- * <p>
- * // параллельные клиентские вызовы с виртуалок ...
- * <p>
- * node.close();   // закроет все каналы, клиент, driver, executor.
+ * Корневой RPC-объект на один процесс.
  *
- * <p>Root RPC object for one process. It owns the Aeron client, optionally an
- * embedded MediaDriver, the shared offload executor, and all channels created
- * through this node.</p>
+ * <p>Root RPC object for one process.</p>
+ *
+ * <p>Node владеет:
+ * embedded {@link MediaDriver} при необходимости,
+ * одним {@link Aeron} client-ом,
+ * общим offload executor-ом,
+ * общим receive poller-ом, если он включён,
+ * и списком каналов, созданных через этот node.</p>
+ *
+ * <p>The node owns:
+ * an embedded {@link MediaDriver} when needed,
+ * a single {@link Aeron} client,
+ * a shared offload executor,
+ * a shared receive poller when enabled,
+ * and the list of channels created through the node.</p>
  */
 public final class RpcNode implements AutoCloseable {
 
     private final Aeron aeron;
-    private final MediaDriver mediaDriver;     // null, если внешний driver
+    private final MediaDriver mediaDriver;
     private final ExecutorService offloadExecutor;
     private final SharedReceivePoller receivePoller;
     private final CopyOnWriteArrayList<RpcChannel> channels = new CopyOnWriteArrayList<>();
@@ -62,34 +51,24 @@ public final class RpcNode implements AutoCloseable {
     }
 
     /**
-     * Запускает RPC-узел с заданной конфигурацией.
+     * Запускает RPC node с заданной конфигурацией.
      *
      * <p>Starts an RPC node using the provided configuration.</p>
      *
-     * @param config конфигурация узла / node configuration
-     * @return запущенный RPC-узел / started RPC node
+     * @param config конфигурация node-а / node configuration
+     * @return запущенный RPC node / started RPC node
      */
     public static RpcNode start(final NodeConfig config) {
         ensureAeronDirParent(config.aeronDir());
         final MediaDriver driver;
         final String aeronDirName;
         if (config.embeddedDriver()) {
-            // ThreadingMode.SHARED: все компоненты MediaDriver-а (sender,
-            // receiver, conductor) в ОДНОМ треде. Против DEDICATED экономим
-            // 2 ядра CPU на процесс. Latency чуть выше (один тред обрабатывает
-            // и send и receive), но для RPC с локального хоста разница в
-            // единицах микросекунд. В реальной сетке это всё равно перекроет
-            // сам network round-trip.
-            //
-            // Если нужен абсолютный минимум latency — поменяйте на DEDICATED.
             final MediaDriver.Context driverCtx = new MediaDriver.Context()
                     .aeronDirectoryName(config.aeronDir())
                     .dirDeleteOnStart(true)
                     .dirDeleteOnShutdown(true)
                     .threadingMode(ThreadingMode.SHARED)
                     .termBufferSparseFile(true)
-                    // sharedIdleStrategy используется в SHARED mode.
-                    // BackoffIdleStrategy с min=1ns, max=1ms — стандарт Aeron.
                     .sharedIdleStrategy(new BackoffIdleStrategy(
                             100, 10,
                             1L,
@@ -103,8 +82,6 @@ public final class RpcNode implements AutoCloseable {
             aeronDirName = config.aeronDir();
         }
         final Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(aeronDirName));
-        // Общий executor виртуальных потоков для всех OFFLOAD-handler-ов всех каналов.
-        // Шарится намеренно: уменьшает число carrier-ов и упрощает lifecycle.
         final ExecutorService exec = Executors.newVirtualThreadPerTaskExecutor();
         final SharedReceivePoller receivePoller = config.sharedReceivePoller()
                 ? new SharedReceivePoller(config.sharedReceivePollerThreads(), config.sharedReceivePollerFragmentLimit())
@@ -113,13 +90,9 @@ public final class RpcNode implements AutoCloseable {
     }
 
     /**
-     * Создаёт новый канал и возвращает его. Handler-ы регистрируются пользователем,
-     * после чего вызывается channel.start().
-     * <p>
-     * Канал автоматически добавляется в список для close-в-каскаде.
+     * Создаёт новый канал и добавляет его в node-owned список каналов.
      *
-     * <p>Creates a new channel and adds it to the node-owned channel list so it
-     * can be closed together with the node.</p>
+     * <p>Creates a new channel and adds it to the node-owned channel list.</p>
      *
      * @param channelConfig конфигурация канала / channel configuration
      * @return новый RPC-канал / new RPC channel
@@ -131,16 +104,19 @@ public final class RpcNode implements AutoCloseable {
     }
 
     /**
-     * Закрывает все каналы, Aeron-клиент, MediaDriver и общий executor.
+     * Закрывает каналы, Aeron client, optional MediaDriver и shared executor.
      *
-     * <p>Closes all channels, the Aeron client, MediaDriver, and shared executor.</p>
+     * <p>Closes all channels, the Aeron client, the optional MediaDriver, and
+     * the shared executor.</p>
      */
     @Override
     public void close() {
         for (final RpcChannel ch : channels) {
             try {
                 ch.close();
-            } catch (final Throwable t) { /* keep going */ }
+            } catch (final Throwable t) {
+                // keep going
+            }
         }
         channels.clear();
         if (receivePoller != null) {

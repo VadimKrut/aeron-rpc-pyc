@@ -5,11 +5,13 @@ import org.agrona.concurrent.ManyToManyConcurrentArrayQueue;
 /**
  * Пул переиспользуемых {@link PendingCall} объектов.
  *
- * <p>Пул основан на lock-free очереди Agrona. Если пул временно пуст во время
- * прогрева или пикового трафика, создается новый слот.</p>
+ * <p>Пул построен на lock-free очереди Agrona. В нормальном режиме слот
+ * берется из пула и после завершения вызова возвращается обратно. Если пул
+ * временно пуст во время прогрева или всплеска нагрузки, создается новый слот.</p>
  *
  * <p>Pool of reusable {@link PendingCall} objects backed by an Agrona lock-free
- * queue. If the pool is temporarily empty, a new slot is created.</p>
+ * queue. Under normal load a slot is borrowed and returned. If the pool is
+ * temporarily empty during warmup or a burst, a new slot is created.</p>
  */
 public final class PendingCallPool {
 
@@ -20,7 +22,8 @@ public final class PendingCallPool {
      *
      * <p>Creates a pool with preallocated slots.</p>
      *
-     * @param capacity количество заранее созданных слотов / number of preallocated slots
+     * @param capacity количество заранее созданных слотов /
+     *                 number of preallocated slots
      */
     public PendingCallPool(final int capacity) {
         this.free = new ManyToManyConcurrentArrayQueue<>(capacity);
@@ -30,7 +33,8 @@ public final class PendingCallPool {
     /**
      * Берет слот из пула или создает новый при временном переполнении.
      *
-     * <p>Acquires a slot from the pool or creates a new one on temporary overflow.</p>
+     * <p>Acquires a slot from the pool or creates a new one on temporary
+     * overflow.</p>
      *
      * @return слот ожидающего RPC-вызова / pending RPC call slot
      */

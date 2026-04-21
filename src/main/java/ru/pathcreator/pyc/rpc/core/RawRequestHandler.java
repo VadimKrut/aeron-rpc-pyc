@@ -4,50 +4,43 @@ import org.agrona.DirectBuffer;
 import org.agrona.MutableDirectBuffer;
 
 /**
- * Low-level zero-alloc серверный handler.
- * <p>
- * В отличие от {@link RequestHandler}&lt;Req,Resp&gt;, здесь пользователь
- * работает с сырыми байтами:
- * - request буфер и length передаются напрямую;
- * - для response пользователю даётся MutableDirectBuffer с уже
- * зарезервированным местом под envelope (пишем payload начиная с
- * responseOffset). Возвращаем длину payload-а.
- * <p>
- * Возврат 0 или отрицательного числа = ответа не будет (one-way семантика).
- * <p>
- * Эта модель — предпочтительная на очень high-throughput / low-latency
- * серверах: ни декодирования request в POJO, ни encode response-POJO,
- * ни боксинга. SBE / Kryo flyweight декодер пользователь вызывает прямо
- * из своего rawHandle(...).
- * <p>
- * Ответственность пользователя:
- * - не писать в request buffer (он может быть shared rx-buffer-ом);
- * - request buffer валиден только пока handle() не вернулся
- * (в обычном offload-режиме это копия из пула; в direct-executor-режиме
- * это rx-буфер Aeron-а);
- * - в responseBuffer писать начиная с responseOffset и не дальше
- * responseOffset + responseCapacity.
+ * Низкоуровневый zero-allocation handler для сырых request/response байтов.
  *
- * <p>Low-level zero-allocation server handler. It receives raw request bytes
- * and writes raw response bytes directly into the provided response buffer.</p>
+ * <p>Low-level zero-allocation handler for raw request and response bytes.</p>
+ *
+ * <p>В отличие от {@link RequestHandler}, здесь пользователь работает напрямую
+ * с байтами:
+ * request приходит как диапазон в {@link DirectBuffer}, а response нужно
+ * записать в предоставленный {@link MutableDirectBuffer} начиная с
+ * {@code responseOffset}. Возвращаемое значение — длина response payload.</p>
+ *
+ * <p>Unlike {@link RequestHandler}, this API works directly with bytes:
+ * the request arrives as a range inside a {@link DirectBuffer}, and the
+ * response must be written into the provided {@link MutableDirectBuffer}
+ * starting at {@code responseOffset}. The return value is the response payload
+ * length.</p>
+ *
+ * <p>Значение {@code <= 0} означает, что ответ не отправляется.</p>
+ *
+ * <p>A return value of {@code <= 0} means that no response should be sent.</p>
  */
 @FunctionalInterface
 public interface RawRequestHandler {
 
     /**
-     * Обрабатывает raw-запрос и записывает payload ответа.
+     * Обрабатывает raw-запрос и пишет raw-ответ.
      *
-     * <p>Handles a raw request and writes the response payload.</p>
+     * <p>Handles a raw request and writes a raw response.</p>
      *
      * @param requestBuffer    буфер с payload запроса / buffer containing the request payload
      * @param requestOffset    смещение payload запроса / request payload offset
      * @param requestLength    длина payload запроса в байтах / request payload length in bytes
      * @param responseBuffer   буфер для payload ответа / buffer for the response payload
      * @param responseOffset   смещение, с которого нужно писать ответ / offset where response writing starts
-     * @param responseCapacity доступная емкость для payload ответа / available response payload capacity
-     * @return число записанных байт в {@code responseBuffer}; значение {@code <= 0}
-     * означает one-way вызов без ответа /
-     * number of bytes written to {@code responseBuffer}; {@code <= 0} means no response
+     * @param responseCapacity доступная емкость для payload ответа /
+     *                         available response payload capacity
+     * @return число записанных байт; {@code <= 0} означает отсутствие ответа /
+     * number of bytes written; {@code <= 0} means no response
      */
     int handle(
             DirectBuffer requestBuffer,

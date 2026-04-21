@@ -5,23 +5,22 @@ import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Маркер-executor для опции "выполнять handler прямо в rx-треде".
+ * Маркерный executor для режима "выполнять handler прямо в RX-thread".
  *
- * <p>Не должен реально вызываться: RpcChannel проверяет {@link
- * ChannelConfig#isDirectExecutor()} и выбирает in-thread путь до того
- * как что-то submit-ить. На всякий случай реализует
- * {@link #execute(Runnable)} синхронно, но это fallback.</p>
+ * <p>Класс не предназначен для обычного submit/use как полноценный executor.
+ * {@link RpcChannel} распознает этот marker и переключается в direct
+ * in-thread execution path до фактического submit-а задачи.</p>
  *
- * <p>Marker executor for the option that executes handlers directly in the
- * receive thread.</p>
+ * <p>Marker executor for the mode that executes handlers directly in the
+ * receive thread. It is not intended to behave like a regular executor.
+ * {@link RpcChannel} recognizes this marker and switches into the direct
+ * in-thread execution path before submitting anything.</p>
  */
 final class DirectExecutorMarker extends AbstractExecutorService {
     /**
      * Выполняет команду синхронно в текущем потоке.
      *
      * <p>Executes the command synchronously in the current thread.</p>
-     *
-     * @param command команда для выполнения / command to execute
      */
     @Override
     public void execute(final Runnable command) {
@@ -29,20 +28,18 @@ final class DirectExecutorMarker extends AbstractExecutorService {
     }
 
     /**
-     * Завершает executor.
+     * Логически завершает marker-executor.
      *
-     * <p>Shuts down the executor.</p>
+     * <p>Logically shuts down the marker executor.</p>
      */
     @Override
     public void shutdown() {
     }
 
     /**
-     * Завершает executor и возвращает невыполненные задачи.
+     * Возвращает пустой список, потому что marker не держит очередь задач.
      *
-     * <p>Shuts down the executor and returns pending tasks.</p>
-     *
-     * @return пустой список задач / empty task list
+     * <p>Returns an empty list because the marker keeps no task queue.</p>
      */
     @Override
     public List<Runnable> shutdownNow() {
@@ -50,12 +47,10 @@ final class DirectExecutorMarker extends AbstractExecutorService {
     }
 
     /**
-     * Проверяет, был ли executor остановлен.
+     * Всегда возвращает {@code false}, так как marker не отслеживает shutdown state.
      *
-     * <p>Checks whether the executor has been shut down.</p>
-     *
-     * @return {@code false}, так как маркер не хранит состояние shutdown /
-     * {@code false} because the marker does not keep shutdown state
+     * <p>Always returns {@code false} because the marker does not track
+     * shutdown state.</p>
      */
     @Override
     public boolean isShutdown() {
@@ -63,12 +58,10 @@ final class DirectExecutorMarker extends AbstractExecutorService {
     }
 
     /**
-     * Проверяет, завершился ли executor.
+     * Всегда возвращает {@code false}, так как marker не отслеживает termination state.
      *
-     * <p>Checks whether the executor has terminated.</p>
-     *
-     * @return {@code false}, так как маркер не хранит состояние завершения /
-     * {@code false} because the marker does not keep termination state
+     * <p>Always returns {@code false} because the marker does not track
+     * termination state.</p>
      */
     @Override
     public boolean isTerminated() {
@@ -76,14 +69,10 @@ final class DirectExecutorMarker extends AbstractExecutorService {
     }
 
     /**
-     * Ожидает завершения executor-а.
+     * Всегда возвращает {@code true}, потому что marker не имеет фоновых задач.
      *
-     * <p>Waits for executor termination.</p>
-     *
-     * @param timeout максимальное время ожидания / maximum wait time
-     * @param unit    единица измерения времени / time unit
-     * @return {@code true}, так как у маркера нет фоновых задач /
-     * {@code true} because the marker has no background tasks
+     * <p>Always returns {@code true} because the marker has no background
+     * tasks.</p>
      */
     @Override
     public boolean awaitTermination(final long timeout, final TimeUnit unit) {

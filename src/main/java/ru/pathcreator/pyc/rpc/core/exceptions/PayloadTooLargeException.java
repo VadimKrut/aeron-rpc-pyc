@@ -1,34 +1,28 @@
 package ru.pathcreator.pyc.rpc.core.exceptions;
 
 /**
- * Исключение, которое сообщает, что полезная нагрузка превышает лимит канала.
+ * Исключение, которое сигнализирует, что payload превышает лимит канала.
  *
- * <p>Исключение выбрасывается до отправки сообщения, если размер payload больше
- * настроенного максимального размера сообщения. Это защищает канал от фрагментов,
- * которые не должны передаваться через обычный RPC-путь.</p>
- *
- * <p>Exception indicating that the payload exceeds the channel message size limit.
- * It is thrown before sending when the payload is larger than the configured
- * maximum message size.</p>
+ * <p>Exception indicating that the payload exceeds the channel limit.</p>
  */
 public final class PayloadTooLargeException extends RpcException {
     /**
-     * Фактический размер отклоненного payload.
+     * фактический размер payload / actual payload size.
      */
     private final int actual;
 
     /**
-     * Максимально допустимый размер payload.
+     * лимит payload для канала / configured payload size limit.
      */
     private final int limit;
 
     /**
-     * Создает исключение с фактическим размером payload и допустимым лимитом.
+     * Создаёт исключение с фактическим размером payload и лимитом.
      *
      * <p>Creates an exception with the actual payload size and the configured limit.</p>
      *
-     * @param actual фактический размер payload в байтах / actual payload size in bytes
-     * @param limit  максимально допустимый размер payload в байтах / maximum allowed payload size in bytes
+     * @param actual фактический размер в байтах / actual payload size in bytes
+     * @param limit  лимит в байтах / maximum allowed size in bytes
      */
     public PayloadTooLargeException(final int actual, final int limit) {
         super("Payload too large: " + actual + " bytes > limit " + limit + " bytes.");
@@ -41,18 +35,18 @@ public final class PayloadTooLargeException extends RpcException {
      *
      * <p>Returns the actual payload size that was rejected.</p>
      *
-     * @return фактический размер payload в байтах / actual payload size in bytes
+     * @return actual payload size
      */
     public int actual() {
         return actual;
     }
 
     /**
-     * Возвращает максимально допустимый размер payload для канала.
+     * Возвращает лимит размера payload для канала.
      *
-     * <p>Returns the maximum payload size allowed by the channel.</p>
+     * <p>Returns the payload size limit for the channel.</p>
      *
-     * @return лимит размера payload в байтах / payload size limit in bytes
+     * @return configured payload size limit
      */
     public int limit() {
         return limit;

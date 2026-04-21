@@ -10,18 +10,18 @@ import java.util.concurrent.locks.LockSupport;
 /**
  * Слот состояния для одного ожидающего синхронного RPC-вызова.
  *
- * <p>Объект хранит поток caller-а, идентификатор корреляции и результат ожидания:
- * успешный response payload или причину fail-fast завершения. Response payload
- * копируется во внутренний direct-буфер, который переиспользуется между вызовами
- * и растет только при необходимости.</p>
+ * <p>Объект связывает caller thread, correlation id и результат ожидания:
+ * успешный response payload либо структурированную ошибку. Response payload
+ * копируется во внутренний direct buffer, который переиспользуется между
+ * вызовами и увеличивается только при необходимости.</p>
  *
- * <p>State slot for one pending synchronous RPC call. It stores the caller thread,
- * correlation identifier, and completion result: either a response payload or a
- * fail-fast reason.</p>
+ * <p>State slot for one pending synchronous RPC call. It stores the caller
+ * thread, correlation identifier, and completion result: either a successful
+ * response payload or a structured failure.</p>
  *
- * <p>Модель памяти / Memory model: все записи результата выполняются до записи
- * в volatile-поле {@code completed}; caller сначала читает {@code completed},
- * а затем безопасно читает остальные поля результата.</p>
+ * <p>Модель памяти / Memory model: данные результата записываются до volatile
+ * флага {@code completed}; ожидающий поток сначала читает {@code completed}, а
+ * затем безопасно читает остальные поля результата.</p>
  */
 public final class PendingCall {
 
@@ -34,8 +34,8 @@ public final class PendingCall {
     private long correlationId;
     private int expectedResponseTypeId;
 
-    // Response payload хранится в этом direct buffer.
-    // Первая инициализация в constructor на "разумный" размер, растёт только вверх.
+    // Response payload lives in this reusable direct buffer. The capacity grows
+    // only when a larger response must be copied in.
     private UnsafeBuffer responseBuffer;
 
     private int responseLength;
@@ -43,7 +43,7 @@ public final class PendingCall {
     private static final int INITIAL_RESPONSE_CAPACITY = 256;
 
     /**
-     * Создает пустой слот ожидающего RPC-вызова.
+     * Создает пустой slot ожидающего RPC-вызова.
      *
      * <p>Creates an empty pending RPC call slot.</p>
      */
@@ -54,21 +54,30 @@ public final class PendingCall {
     /**
      * Подготавливает слот перед регистрацией в реестре ожидающих вызовов.
      *
-     * <p>Prepares the slot before it is registered in the pending call registry.</p>
+     * <p>Prepares the slot before it is registered in the pending call
+     * registry.</p>
      *
-     * @param caller        поток, который ожидает ответ / thread waiting for the response
-     * @param correlationId идентификатор корреляции запроса / request correlation identifier
+     * @param caller        поток, который ожидает ответ /
+     *                      thread waiting for the response
+     * @param correlationId идентификатор корреляции запроса /
+     *                      request correlation identifier
      */
     public void prepare(final Thread caller, final long correlationId) {
         prepare(caller, correlationId, 0);
     }
 
     /**
-     * Prepares the slot before it is registered in the pending call registry.
+     * Подготавливает слот перед регистрацией в реестре ожидающих вызовов.
      *
-     * @param caller                 caller thread waiting for the response
-     * @param correlationId          request correlation identifier
-     * @param expectedResponseTypeId expected response message type identifier
+     * <p>Prepares the slot before it is registered in the pending call
+     * registry.</p>
+     *
+     * @param caller                 поток, который ожидает ответ /
+     *                               caller thread waiting for the response
+     * @param correlationId          идентификатор корреляции запроса /
+     *                               request correlation identifier
+     * @param expectedResponseTypeId ожидаемый тип response message /
+     *                               expected response message type identifier
      */
     public void prepare(final Thread caller, final long correlationId, final int expectedResponseTypeId) {
         this.parkedThread = caller;
@@ -84,21 +93,25 @@ public final class PendingCall {
     /**
      * Записывает успешный результат и пробуждает ожидающий поток.
      *
-     * <p>Метод копирует response payload во внутренний буфер, увеличивая его
-     * емкость при необходимости. Обычно вызывается из rx-потока.</p>
+     * <p>Payload ответа копируется во внутренний буфер, который при
+     * необходимости увеличивается. Обычно метод вызывается из receive path.</p>
      *
-     * <p>Stores a successful response and unparks the waiting thread. The response
-     * payload is copied into the internal buffer, which grows when required.</p>
+     * <p>Stores a successful result and unparks the waiting thread. The
+     * response payload is copied into the internal buffer, which grows when
+     * needed. The method is typically called from the receive path.</p>
      *
-     * @param src    буфер-источник с payload ответа / source buffer containing the response payload
-     * @param offset смещение payload в буфере-источнике / payload offset in the source buffer
-     * @param length длина payload в байтах / payload length in bytes
+     * @param src    буфер-источник с payload ответа /
+     *               source buffer containing the response payload
+     * @param offset смещение payload в буфере-источнике /
+     *               payload offset in the source buffer
+     * @param length длина payload в байтах /
+     *               payload length in bytes
      */
     public void completeOk(final org.agrona.DirectBuffer src, final int offset, final int length) {
         ensureResponseCapacity(length);
         responseBuffer.putBytes(0, src, offset, length);
         this.responseLength = length;
-        this.completed = true;  // volatile release
+        this.completed = true;
         final Thread t = this.parkedThread;
         if (t != null) LockSupport.unpark(t);
     }
@@ -115,10 +128,13 @@ public final class PendingCall {
     }
 
     /**
-     * Completes the call with a structured exception and unparks the waiting
-     * thread.
+     * Завершает вызов структурированной ошибкой и пробуждает ожидающий поток.
      *
-     * @param exception failure to propagate to the caller
+     * <p>Completes the call with a structured exception and unparks the waiting
+     * thread.</p>
+     *
+     * @param exception ошибка для передачи caller-у /
+     *                  failure to propagate to the caller
      */
     public void completeFail(final RpcException exception) {
         this.failure = exception;
@@ -134,7 +150,8 @@ public final class PendingCall {
      *
      * <p>Checks whether the call has completed.</p>
      *
-     * @return {@code true}, если вызов завершен / {@code true} if the call is completed
+     * @return {@code true}, если вызов завершен /
+     * {@code true} if the call is completed
      */
     public boolean isCompleted() {
         return completed;
@@ -145,7 +162,8 @@ public final class PendingCall {
      *
      * <p>Checks whether the call completed with a failure.</p>
      *
-     * @return {@code true}, если вызов завершился ошибкой / {@code true} if the call failed
+     * @return {@code true}, если вызов завершился ошибкой /
+     * {@code true} if the call failed
      */
     public boolean isFailed() {
         return failed;
@@ -164,16 +182,19 @@ public final class PendingCall {
     }
 
     /**
-     * Returns the failure exception captured for the call.
+     * Возвращает исключение, сохраненное для вызова.
      *
-     * @return failure exception or {@code null} when there is no failure
+     * <p>Returns the failure exception captured for the call.</p>
+     *
+     * @return исключение ошибки или {@code null}, если ошибки нет /
+     * failure exception or {@code null} when there is no failure
      */
     public RpcException failure() {
         return failure;
     }
 
     /**
-     * Возвращает идентификатор корреляции связанного запроса.
+     * Возвращает correlation id связанного запроса.
      *
      * <p>Returns the correlation identifier of the associated request.</p>
      *
@@ -184,22 +205,25 @@ public final class PendingCall {
     }
 
     /**
-     * Returns the expected response message type identifier for this call.
+     * Возвращает ожидаемый response message type id.
      *
-     * @return expected response message type identifier
+     * <p>Returns the expected response message type identifier.</p>
+     *
+     * @return ожидаемый идентификатор типа ответа /
+     * expected response message type identifier
      */
     public int expectedResponseTypeId() {
         return expectedResponseTypeId;
     }
 
     /**
-     * Возвращает буфер с response payload.
+     * Возвращает буфер с payload ответа.
      *
-     * <p>Caller должен читать этот буфер только после того, как {@link #isCompleted()}
-     * вернул {@code true}.</p>
+     * <p>Caller должен читать этот буфер только после того, как
+     * {@link #isCompleted()} вернул {@code true}.</p>
      *
-     * <p>Returns the response payload buffer. The caller should read this buffer
-     * only after {@link #isCompleted()} returns {@code true}.</p>
+     * <p>Returns the response payload buffer. The caller should read it only
+     * after {@link #isCompleted()} returns {@code true}.</p>
      *
      * @return буфер с payload ответа / response payload buffer
      */
@@ -208,11 +232,12 @@ public final class PendingCall {
     }
 
     /**
-     * Возвращает длину response payload.
+     * Возвращает длину payload ответа.
      *
      * <p>Returns the response payload length.</p>
      *
-     * @return длина payload ответа в байтах / response payload length in bytes
+     * @return длина payload ответа в байтах /
+     * response payload length in bytes
      */
     public int responseLength() {
         return responseLength;

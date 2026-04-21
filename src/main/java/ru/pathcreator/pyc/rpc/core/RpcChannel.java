@@ -25,9 +25,9 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * Один двунаправленный RPC-канал.
+ * Один двунаправленный RPC-канал поверх Aeron. / One bidirectional RPC channel over Aeron.
  *
- * <h2>Архитектура</h2>
+ * <h2>Архитектура / Architecture</h2>
  *
  * <pre>
  *   caller (virtual or platform thread)
@@ -55,7 +55,7 @@ import java.util.logging.Logger;
  *                   OR direct-execute in rx thread (if DIRECT_EXECUTOR configured)
  * </pre>
  *
- * <h2>Ключевые свойства</h2>
+ * <h2>Ключевые свойства / Key properties</h2>
  * <ul>
  *  <li>Нет sender-треда и MPSC-очереди. Caller пишет прямо в
  *      {@link ConcurrentPublication#tryClaim}. На один hop меньше.</li>
@@ -144,45 +144,44 @@ public final class RpcChannel implements AutoCloseable {
         }
     }
 
-    // ---- fields ----
-    private final ChannelConfig config;
     private final Aeron aeron;
-    private final boolean directExecutor;
-    private final ExecutorService offloadExecutor;
-    private final SharedReceivePoller receivePoller;
-    private final ReconnectStrategy reconnectStrategy;
-    private final boolean recreateTransportOnDisconnect;
-    private final boolean protocolHandshakeEnabled;
-    private final long offerTimeoutNs;
-    private final long protocolHandshakeTimeoutNs;
     private final int maxMessageSize;
     private final int protocolVersion;
+    private final long offerTimeoutNs;
+    private volatile boolean draining;
+    private final boolean hasListeners;
+    private final ChannelConfig config;
+    private final boolean directExecutor;
     private final long protocolCapabilities;
+    private final boolean callEventListeners;
+    private final boolean drainStateListeners;
+    private final boolean remoteErrorListeners;
+    private volatile int remoteProtocolVersion;
+    private final boolean channelStateListeners;
+    private final RpcChannelListener[] listeners;
+    private final boolean reconnectStateListeners;
     private final long requiredRemoteCapabilities;
+    private final ExecutorService offloadExecutor;
+    private final long protocolHandshakeTimeoutNs;
+    private final Object drainLock = new Object();
+    private final boolean protocolHandshakeEnabled;
+    private final RpcChannelListener singleListener;
+    private final SharedReceivePoller receivePoller;
+    private volatile long remoteProtocolCapabilities;
+    private final boolean protocolHandshakeListeners;
     private final Object transportLock = new Object();
     private final Object handshakeLock = new Object();
-    private final Object drainLock = new Object();
-    private final RpcChannelListener[] listeners;
-    private final RpcChannelListener singleListener;
-    private final boolean hasListeners;
-    private final boolean callEventListeners;
-    private final boolean remoteErrorListeners;
-    private final boolean channelStateListeners;
-    private final boolean drainStateListeners;
-    private final boolean reconnectStateListeners;
-    private final boolean protocolHandshakeListeners;
-    private volatile boolean draining;
-    private final AtomicInteger inFlightHandlers = new AtomicInteger();
+    private final ReconnectStrategy reconnectStrategy;
     private volatile boolean protocolHandshakeComplete;
-    private volatile int remoteProtocolVersion;
-    private volatile long remoteProtocolCapabilities;
+    private final boolean recreateTransportOnDisconnect;
+    private final AtomicInteger inFlightHandlers = new AtomicInteger();
 
-    private volatile Subscription subscription;
-    private volatile ConcurrentPublication publication;
-    private final Subscription steadySubscription;
-    private final ConcurrentPublication steadyPublication;
-    private final String outboundChannel;
     private final String inboundChannel;
+    private final String outboundChannel;
+    private volatile Subscription subscription;
+    private final Subscription steadySubscription;
+    private volatile ConcurrentPublication publication;
+    private final ConcurrentPublication steadyPublication;
 
     /**
      * Read-only after start().
@@ -225,7 +224,7 @@ public final class RpcChannel implements AutoCloseable {
     private final OffloadTask.Body offloadBody = this::runOffload;
 
     /**
-     * Создает RPC-канал поверх указанного Aeron-клиента.
+     * Создаёт RPC-канал поверх указанного Aeron-клиента.
      *
      * <p>Creates an RPC channel over the provided Aeron client.</p>
      *
@@ -314,8 +313,8 @@ public final class RpcChannel implements AutoCloseable {
                 .reliable(true);
         if (config.sessionId() != 0) outbound.sessionId(config.sessionId());
 
-        // ConcurrentPublication: несколько caller-ов могут tryClaim/offer
-        // одновременно без нашего локинга.
+        // ConcurrentPublication позволяет нескольким caller-ам выполнять tryClaim/offer
+        // одновременно без внешней сериализации со стороны канала.
         this.outboundChannel = outbound.build();
         this.publication = aeron.addPublication(outboundChannel, config.streamId());
         this.steadyPublication = this.publication;
@@ -417,7 +416,7 @@ public final class RpcChannel implements AutoCloseable {
     // ================================================================
 
     /**
-     * Запускает rx-поток канала и heartbeat.
+     * Запускает receive path канала и heartbeat.
      *
      * <p>Starts the channel receive thread and heartbeat manager.</p>
      */
@@ -532,7 +531,7 @@ public final class RpcChannel implements AutoCloseable {
     }
 
     /**
-     * Проверяет, подключен ли канал с точки зрения Aeron publication и heartbeat.
+     * Проверяет, считается ли канал подключенным по состоянию publication и heartbeat.
      *
      * <p>Checks whether the channel is connected according to both Aeron publication
      * state and heartbeat state.</p>
@@ -598,14 +597,14 @@ public final class RpcChannel implements AutoCloseable {
     // ================================================================
 
     /**
-     * Выполняет синхронный RPC-вызов с таймаутом и backpressure-политикой из конфигурации.
+     * Выполняет синхронный RPC-вызов с таймаутом и backpressure-политикой из конфигурации канала.
      *
      * <p>Performs a synchronous RPC call using timeout and backpressure policy from
      * the channel configuration.</p>
      *
      * @param <Req>                  тип объекта запроса / request object type
      * @param <Resp>                 тип объекта ответа / response object type
-     * @param requestMessageTypeId   тип отправляемого запроса / outgoing request message type
+     * @param requestMessageTypeId   тип исходящего запроса / outgoing request message type
      * @param expectedResponseTypeId ожидаемый тип ответа / expected response message type
      * @param request                объект запроса / request object
      * @param reqCodec               кодек запроса / request codec
@@ -630,7 +629,7 @@ public final class RpcChannel implements AutoCloseable {
      *
      * @param <Req>                  тип объекта запроса / request object type
      * @param <Resp>                 тип объекта ответа / response object type
-     * @param requestMessageTypeId   тип отправляемого запроса / outgoing request message type
+     * @param requestMessageTypeId   тип исходящего запроса / outgoing request message type
      * @param expectedResponseTypeId ожидаемый тип ответа / expected response message type
      * @param request                объект запроса / request object
      * @param reqCodec               кодек запроса / request codec
@@ -660,7 +659,7 @@ public final class RpcChannel implements AutoCloseable {
      *
      * @param <Req>                  тип объекта запроса / request object type
      * @param <Resp>                 тип объекта ответа / response object type
-     * @param requestMessageTypeId   тип отправляемого запроса / outgoing request message type
+     * @param requestMessageTypeId   тип исходящего запроса / outgoing request message type
      * @param expectedResponseTypeId ожидаемый тип ответа / expected response message type
      * @param request                объект запроса / request object
      * @param reqCodec               кодек запроса / request codec
@@ -1291,11 +1290,11 @@ public final class RpcChannel implements AutoCloseable {
     private void emitHeartbeat(final long nowNanos) {
         final UnsafeBuffer staging = txStaging.get();
         EnvelopeCodec.encode(staging, 0, Envelope.RESERVED_HEARTBEAT, 0L, Envelope.FLAG_IS_HEARTBEAT, 0);
-        // FAIL_FAST: пропустим тик если publication под нагрузкой.
+        // FAIL_FAST: пропускаем тик, если publication сейчас занята.
         try {
             publishBytes(staging, 0, Envelope.LENGTH, BackpressurePolicy.FAIL_FAST);
         } catch (final Throwable t) {
-            // ignore — следующий тик перекроет
+            // ignore: следующий heartbeat tick восстановит логику liveness
         }
     }
 

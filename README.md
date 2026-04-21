@@ -51,7 +51,7 @@ the business flow is naturally request/response.
 <dependency>
     <groupId>ru.pathcreator.pyc</groupId>
     <artifactId>rpc-core</artifactId>
-    <version>0.1.1</version>
+    <version>0.1.2</version>
 </dependency>
 </dependencies>
 ```
@@ -77,7 +77,7 @@ GitHub Packages requires authentication even for reads. Add a token with
 <dependency>
     <groupId>ru.pathcreator.pyc</groupId>
     <artifactId>rpc-core</artifactId>
-    <version>0.1.1</version>
+    <version>0.1.2</version>
 </dependency>
 </dependencies>
 ```

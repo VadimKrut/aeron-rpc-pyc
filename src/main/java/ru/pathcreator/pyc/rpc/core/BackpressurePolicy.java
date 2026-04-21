@@ -1,37 +1,36 @@
 package ru.pathcreator.pyc.rpc.core;
 
 /**
- * Что делать когда Aeron publication возвращает BACK_PRESSURED дольше
+ * Политика поведения, когда Aeron publication остается back-pressured дольше
  * {@code offerTimeout}.
  *
- * <p>Упрощён до двух значений (убраны DROP_NEW / DROP_OLDEST). Для RPC
- * запрос/ответ они почти всегда вредны: caller ждёт ответа — если мы
- * "молча дропнем" или "вытесним" его запрос, он всё равно упадёт по
- * таймауту.</p>
- *
- * <p>Defines what the RPC channel should do when an Aeron publication stays
+ * <p>Policy describing what to do when an Aeron publication remains
  * back-pressured longer than {@code offerTimeout}.</p>
+ *
+ * <p>Политика intentionally сведена к двум значениям. Для request/response RPC
+ * варианты вроде silent drop обычно вредны: caller всё равно ждет ответ и в
+ * итоге получит timeout или ошибку, только менее понятным способом.</p>
+ *
+ * <p>The policy is intentionally reduced to two values. For request/response
+ * RPC, silent-drop style behaviors are usually harmful: the caller still waits
+ * for a response and eventually ends up with a timeout or failure, just in a
+ * less explicit way.</p>
  */
 public enum BackpressurePolicy {
 
     /**
-     * Caller паркуется/спинится пока Aeron не примет запрос, либо до
-     * истечения {@code offerTimeout} — тогда {@link
-     * ru.pathcreator.pyc.rpc.core.exceptions.BackpressureException}.
+     * Ждать, пока publication снова сможет принять сообщение, или до
+     * истечения {@code offerTimeout}.
      *
-     * <p>Default. Безопасно для RPC с I/O-бэкендом: просто "запрос
-     * подождёт", как в HTTP при перегрузке сервера.</p>
+     * <p>Wait until the publication can accept the message again, or until
+     * {@code offerTimeout} expires.</p>
      */
     BLOCK,
 
     /**
-     * Сразу {@link ru.pathcreator.pyc.rpc.core.exceptions.BackpressureException}
-     * если первая же попытка offer/tryClaim вернула BACK_PRESSURED.
+     * Сразу завершиться ошибкой при первой же backpressure-неудаче.
      *
-     * <p>Для сервисов где важнее быстро отказать и дать caller-у
-     * сделать fallback, чем замедлять RPC-путь под нагрузкой.</p>
-     *
-     * <p>Fails immediately when the first offer attempt reports backpressure.</p>
+     * <p>Fail immediately on the first backpressure result.</p>
      */
     FAIL_FAST
 }

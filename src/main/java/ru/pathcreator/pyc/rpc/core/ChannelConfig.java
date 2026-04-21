@@ -8,57 +8,61 @@ import java.util.concurrent.ExecutorService;
 /**
  * Конфигурация одного RPC-канала.
  *
- * <h2>Ключевые группы настроек</h2>
+ * <p>Класс описывает транспортный профиль канала: локальный и удаленный Aeron
+ * endpoint, stream/session id, таймауты, heartbeat, backpressure policy,
+ * receive idle strategy, режим выполнения handler-ов и опциональные сервисные
+ * надстройки вроде protocol handshake и listeners.</p>
  *
+ * <p>Configuration of a single RPC channel. It describes the Aeron endpoints,
+ * stream/session ids, timeouts, heartbeat behavior, backpressure policy,
+ * receive idle strategy, handler execution mode, and optional service-level
+ * features such as protocol handshake and listeners.</p>
+ *
+ * <h2>Основные группы настроек / Main setting groups</h2>
  * <ul>
- *   <li><b>Сеть</b>: localEndpoint / remoteEndpoint / streamId.
- *       sessionId опционален (0 = Aeron выберет).</li>
- *   <li><b>Таймауты</b>: defaultTimeout (для call), offerTimeout (для
- *       Publication back-pressure), heartbeat.</li>
- *   <li><b>Idle стратегия rx-треда</b>: {@link #rxIdleStrategy()}.
- *       {@code YIELDING} (default) — rx-тред = 100% одного ядра, низкая
- *       latency. {@code BACKOFF} — ~0% CPU при idle, но штраф на Windows
- *       до ~1 ms на первое сообщение после idle. {@code BUSY_SPIN} —
- *       минимум latency, 100% CPU постоянно.</li>
- *   <li><b>Offload executor</b>: {@link #offloadExecutor()}. Куда
- *       сабмитить серверные handler-ы. Если null — node-default
- *       (virtual-thread-per-task). Специальное значение {@link
- *       #DIRECT_EXECUTOR} = выполнять handler прямо в rx-треде
- *       (zero-copy, минимальная latency, но блокирует приём на время
- *       handler-а — использовать ТОЛЬКО для гарантированно быстрых
- *       handler-ов типа ACK/lookup &lt; 5 µs).</li>
- *   <li><b>Backpressure</b>: BLOCK или FAIL_FAST.</li>
- *   <li><b>maxMessageSize</b>: hard cap 16 MiB, validated and supported by the
- *       regular {@link RpcChannel} path.</li>
+ *   <li><b>Сеть / Network</b>: {@code localEndpoint}, {@code remoteEndpoint},
+ *   {@code streamId}, optional {@code sessionId}.</li>
+ *   <li><b>Таймауты / Timeouts</b>: default RPC timeout, publication offer
+ *   timeout, heartbeat interval and failure threshold.</li>
+ *   <li><b>Прием / Receive path</b>: {@link #rxIdleStrategy()} controls how the
+ *   RX loop behaves while idle.</li>
+ *   <li><b>Обработка / Handler execution</b>: {@link #offloadExecutor()} decides
+ *   whether server handlers run in an executor or directly in the RX path.</li>
+ *   <li><b>Совместимость / Compatibility</b>: protocol version, capability bits,
+ *   and optional handshake timeout.</li>
+ *   <li><b>Наблюдаемость / Observability</b>: optional
+ *   {@link RpcChannelListener} callbacks.</li>
  * </ul>
- *
- * <p>Configuration of one RPC channel. It defines Aeron endpoints, stream
- * parameters, timeouts, heartbeat behavior, backpressure policy, receive idle
- * strategy, and server handler offload settings.</p>
  */
 public final class ChannelConfig {
 
     /**
-     * Максимальный размер сообщения по умолчанию, 16 MiB.
+     * Максимальный размер одного transport message по умолчанию, 16 MiB.
      *
-     * <p>Default maximum message size, 16 MiB.</p>
+     * <p>Default maximum size of one transport message, 16 MiB.</p>
      */
     public static final int DEFAULT_MAX_MESSAGE_SIZE = 16 * 1024 * 1024;
 
     /**
-     * Маркерное значение: "выполнять handler прямо в rx-треде".
+     * Маркерное значение для режима "выполнять handler прямо в RX-пути".
      *
-     * <p>Используется так:
-     * <pre>{@code
-     * ChannelConfig.builder()
-     *     .offloadExecutor(ChannelConfig.DIRECT_EXECUTOR)
-     *     ...
-     * }</pre>
+     * <p>Marker value for the "execute the handler directly in the RX path"
+     * mode.</p>
      *
-     * <p>Тогда RpcChannel не копирует payload и не сабмитит в executor —
-     * зовёт handler прямо из rx-треда. Минимум latency, но rx-тред
-     * блокируется на время handler-а — годится только для очень быстрых
-     * handler-ов.</p>
+     * <p>Используется через {@link Builder#offloadExecutor(ExecutorService)}:
+     * если передать {@code DIRECT_EXECUTOR}, канал не будет offload-ить
+     * обработчик в executor и вызовет его прямо из receive path.</p>
+     *
+     * <p>Use it via {@link Builder#offloadExecutor(ExecutorService)}. When
+     * configured, the channel does not offload the handler and invokes it
+     * directly from the receive path.</p>
+     *
+     * <p>Это минимизирует latency, но блокирует прием на время работы handler-а,
+     * поэтому режим подходит только для гарантированно коротких обработчиков.</p>
+     *
+     * <p>This minimizes latency, but receive progress is blocked while the
+     * handler runs, so the mode is suitable only for guaranteed short
+     * handlers.</p>
      */
     public static final ExecutorService DIRECT_EXECUTOR = new DirectExecutorMarker();
 
@@ -79,15 +83,15 @@ public final class ChannelConfig {
 
     private final int maxMessageSize;
 
-    private final IdleStrategyKind rxIdleStrategy;
-    private final BackpressurePolicy backpressurePolicy;
-    private final ReconnectStrategy reconnectStrategy;
-    private final boolean protocolHandshakeEnabled;
     private final int protocolVersion;
     private final long protocolCapabilities;
-    private final long requiredRemoteCapabilities;
-    private final Duration protocolHandshakeTimeout;
     private final RpcChannelListener[] listeners;
+    private final long requiredRemoteCapabilities;
+    private final IdleStrategyKind rxIdleStrategy;
+    private final boolean protocolHandshakeEnabled;
+    private final Duration protocolHandshakeTimeout;
+    private final ReconnectStrategy reconnectStrategy;
+    private final BackpressurePolicy backpressurePolicy;
 
     private final int pendingPoolCapacity;
     private final int registryInitialCapacity;
@@ -127,8 +131,6 @@ public final class ChannelConfig {
         this.offloadCopyPoolSize = b.offloadCopyPoolSize;
         this.offloadCopyBufferSize = b.offloadCopyBufferSize;
     }
-
-    // ---- getters ----
 
     /**
      * Возвращает локальный UDP endpoint канала.
@@ -479,15 +481,15 @@ public final class ChannelConfig {
 
         private int maxMessageSize = DEFAULT_MAX_MESSAGE_SIZE;
 
-        private IdleStrategyKind rxIdleStrategy = IdleStrategyKind.YIELDING;
-        private BackpressurePolicy backpressurePolicy = BackpressurePolicy.BLOCK;
-        private ReconnectStrategy reconnectStrategy = ReconnectStrategy.FAIL_FAST;
-        private boolean protocolHandshakeEnabled = false;
         private int protocolVersion = 1;
         private long protocolCapabilities = 0L;
         private long requiredRemoteCapabilities = 0L;
+        private boolean protocolHandshakeEnabled = false;
         private Duration protocolHandshakeTimeout = Duration.ofSeconds(1);
+        private IdleStrategyKind rxIdleStrategy = IdleStrategyKind.YIELDING;
         private final List<RpcChannelListener> listeners = new ArrayList<>();
+        private BackpressurePolicy backpressurePolicy = BackpressurePolicy.BLOCK;
+        private ReconnectStrategy reconnectStrategy = ReconnectStrategy.FAIL_FAST;
 
         private int pendingPoolCapacity = 4096;
         private int registryInitialCapacity = 1024;

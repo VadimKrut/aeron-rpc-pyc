@@ -1,18 +1,29 @@
 package ru.pathcreator.pyc.rpc.core.exceptions;
 
 /**
- * Exception thrown by server-side application code to return a structured
- * remote error to the caller.
+ * Исключение, которое server-side application code может выбросить, чтобы
+ * вернуть caller-у structured remote error.
+ *
+ * <p>Exception thrown by server-side application code to return a structured
+ * remote error to the caller.</p>
+ *
+ * <p>Для общих system-like значений используй {@link RpcStatus}. Для
+ * бизнес-ошибок сервиса можно использовать custom code {@code >= 1000}.</p>
  *
  * <p>Use {@link RpcStatus} for shared system-like semantics, or provide a
  * custom application code {@code >= 1000} when the service contract defines
  * its own business error space.</p>
  */
 public final class RpcApplicationException extends RpcException {
+    /**
+     * status code, который нужно пропагировать remote-side / status code to propagate remotely.
+     */
     private final int statusCode;
 
     /**
-     * Creates an application exception with a predefined status.
+     * Создаёт application exception с predefined status.
+     *
+     * <p>Creates an application exception with a predefined status.</p>
      *
      * @param status  transport/application status
      * @param message human-readable error message
@@ -23,7 +34,9 @@ public final class RpcApplicationException extends RpcException {
     }
 
     /**
-     * Creates an application exception with a predefined status and cause.
+     * Создаёт application exception с predefined status и cause.
+     *
+     * <p>Creates an application exception with a predefined status and cause.</p>
      *
      * @param status  transport/application status
      * @param message human-readable error message
@@ -35,7 +48,9 @@ public final class RpcApplicationException extends RpcException {
     }
 
     /**
-     * Creates an application exception with a custom application-defined code.
+     * Создаёт application exception с custom application code.
+     *
+     * <p>Creates an application exception with a custom application-defined code.</p>
      *
      * @param statusCode custom status code, must be {@code >= 1000}
      * @param message    human-readable error message
@@ -46,8 +61,10 @@ public final class RpcApplicationException extends RpcException {
     }
 
     /**
-     * Creates an application exception with a custom application-defined code
-     * and cause.
+     * Создаёт application exception с custom application code и cause.
+     *
+     * <p>Creates an application exception with a custom application-defined code
+     * and cause.</p>
      *
      * @param statusCode custom status code, must be {@code >= 1000}
      * @param message    human-readable error message
@@ -59,9 +76,11 @@ public final class RpcApplicationException extends RpcException {
     }
 
     /**
-     * Returns the numeric status code that should be propagated remotely.
+     * Возвращает числовой status code, который должен уйти remote-side.
      *
-     * @return numeric status code
+     * <p>Returns the numeric status code that should be propagated remotely.</p>
+     *
+     * @return numeric remote status code
      */
     public int statusCode() {
         return statusCode;

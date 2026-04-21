@@ -1,18 +1,21 @@
 package ru.pathcreator.pyc.rpc.core.exceptions;
 
 /**
- * Базовое непроверяемое исключение для ошибок RPC-слоя.
+ * Базовое unchecked-исключение для ошибок RPC-слоя.
  *
- * <p>От этого класса наследуются специализированные исключения, которые описывают
- * транспортные ошибки, таймауты, превышение лимитов и другие сбои RPC-канала.</p>
+ * <p>Base unchecked exception for RPC-layer failures.</p>
  *
- * <p>Base unchecked exception for RPC-layer failures. Specialized exceptions
- * extend this class to describe transport errors, timeouts, limit violations,
- * and other RPC channel failures.</p>
+ * <p>От этого класса наследуются transport-ошибки, timeout-исключения,
+ * structured remote errors, ошибки лимитов и другие сбои, которые могут
+ * возникнуть в канале или вокруг него.</p>
+ *
+ * <p>Transport errors, timeout exceptions, structured remote errors, limit
+ * violations, and related channel failures extend this class.</p>
  */
 public class RpcException extends RuntimeException {
+
     /**
-     * Создает исключение с текстовым описанием ошибки.
+     * Создаёт исключение с текстовым описанием ошибки.
      *
      * <p>Creates an exception with an error message.</p>
      *
@@ -23,12 +26,12 @@ public class RpcException extends RuntimeException {
     }
 
     /**
-     * Создает исключение с текстовым описанием ошибки и исходной причиной.
+     * Создаёт исключение с текстовым описанием ошибки и исходной причиной.
      *
-     * <p>Creates an exception with an error message and the original cause.</p>
+     * <p>Creates an exception with an error message and an original cause.</p>
      *
      * @param message описание ошибки / error message
-     * @param cause   исходная причина ошибки / original cause
+     * @param cause   исходная причина / original cause
      */
     public RpcException(final String message, final Throwable cause) {
         super(message, cause);

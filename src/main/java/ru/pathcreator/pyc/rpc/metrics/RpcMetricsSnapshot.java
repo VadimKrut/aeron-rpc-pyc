@@ -1,23 +1,40 @@
 package ru.pathcreator.pyc.rpc.metrics;
 
 /**
- * Immutable snapshot of listener-based RPC metrics.
+ * Immutable snapshot listener-based RPC метрик.
  *
- * @param callsStarted               number of call-start events observed
- * @param callsSucceeded             number of successful call completions
- * @param callsTimedOut              number of timeout completions
- * @param callsFailed                number of local call failures
- * @param remoteErrors               number of structured remote-error events
- * @param channelUps                 number of channel-up transitions
- * @param channelDowns               number of channel-down transitions
- * @param drainStarts                number of drain-start events
- * @param drainFinishes              number of drain-finished events
- * @param reconnectAttempts          number of reconnect attempts
- * @param reconnectSuccesses         number of reconnect successes
- * @param reconnectFailures          number of reconnect failures
- * @param protocolHandshakeStarts    number of handshake-start events
- * @param protocolHandshakeSuccesses number of successful handshakes
- * @param protocolHandshakeFailures  number of failed handshakes
+ * <p>Immutable snapshot of listener-based RPC metrics.</p>
+ *
+ * @param callsStarted               число call-start событий /
+ *                                   number of call-start events observed
+ * @param callsSucceeded             число успешных завершений /
+ *                                   number of successful call completions
+ * @param callsTimedOut              число timeout-завершений /
+ *                                   number of timeout completions
+ * @param callsFailed                число локальных call failures /
+ *                                   number of local call failures
+ * @param remoteErrors               число structured remote-error событий /
+ *                                   number of structured remote-error events
+ * @param channelUps                 число channel-up переходов /
+ *                                   number of channel-up transitions
+ * @param channelDowns               число channel-down переходов /
+ *                                   number of channel-down transitions
+ * @param drainStarts                число drain-start событий /
+ *                                   number of drain-start events
+ * @param drainFinishes              число drain-finished событий /
+ *                                   number of drain-finished events
+ * @param reconnectAttempts          число reconnect attempts /
+ *                                   number of reconnect attempts
+ * @param reconnectSuccesses         число успешных reconnect /
+ *                                   number of reconnect successes
+ * @param reconnectFailures          число failed reconnect /
+ *                                   number of reconnect failures
+ * @param protocolHandshakeStarts    число handshake-start событий /
+ *                                   number of handshake-start events
+ * @param protocolHandshakeSuccesses число успешных handshake /
+ *                                   number of successful handshakes
+ * @param protocolHandshakeFailures  число failed handshake /
+ *                                   number of failed handshakes
  */
 public record RpcMetricsSnapshot(
         long callsStarted,
@@ -37,19 +54,23 @@ public record RpcMetricsSnapshot(
         long protocolHandshakeFailures
 ) {
     /**
-     * Returns the total number of terminal local call outcomes represented by
-     * this snapshot.
+     * Возвращает суммарное число terminal local call outcomes.
      *
-     * @return completed local call count
+     * <p>Returns the total number of terminal local call outcomes represented
+     * by this snapshot.</p>
+     *
+     * @return total number of completed local call outcomes
      */
     public long completedCalls() {
         return callsSucceeded + callsTimedOut + callsFailed;
     }
 
     /**
-     * Returns whether all counters in this snapshot are zero.
+     * Возвращает, равны ли все счетчики в snapshot нулю.
      *
-     * @return {@code true} when the snapshot is empty
+     * <p>Returns whether all counters in this snapshot are zero.</p>
+     *
+     * @return {@code true} when all counters are zero
      */
     public boolean isEmpty() {
         return callsStarted == 0L &&
@@ -70,10 +91,12 @@ public record RpcMetricsSnapshot(
     }
 
     /**
-     * Returns a delta snapshot produced by subtracting the provided baseline
-     * from this snapshot.
+     * Возвращает delta-snapshot как разницу между текущим snapshot и baseline.
      *
-     * @param baseline earlier snapshot
+     * <p>Returns a delta snapshot produced by subtracting the provided baseline
+     * from this snapshot.</p>
+     *
+     * @param baseline более ранний snapshot / earlier snapshot
      * @return delta snapshot
      */
     public RpcMetricsSnapshot deltaSince(final RpcMetricsSnapshot baseline) {
@@ -97,9 +120,11 @@ public record RpcMetricsSnapshot(
     }
 
     /**
-     * Renders the snapshot as a readable multi-line report.
+     * Рендерит snapshot как читаемый multi-line report.
      *
-     * @return human-readable metrics report
+     * <p>Renders the snapshot as a readable multi-line report.</p>
+     *
+     * @return text report
      */
     public String renderTextReport() {
         return """
@@ -136,14 +161,15 @@ public record RpcMetricsSnapshot(
                 reconnectFailures,
                 protocolHandshakeStarts,
                 protocolHandshakeSuccesses,
-                protocolHandshakeFailures
-        );
+                protocolHandshakeFailures);
     }
 
     /**
-     * Renders the snapshot as a compact JSON document.
+     * Рендерит snapshot как compact JSON document.
      *
-     * @return JSON metrics report
+     * <p>Renders the snapshot as a compact JSON document.</p>
+     *
+     * @return JSON report
      */
     public String renderJsonReport() {
         return """
@@ -164,7 +190,6 @@ public record RpcMetricsSnapshot(
                         reconnectFailures,
                         protocolHandshakeStarts,
                         protocolHandshakeSuccesses,
-                        protocolHandshakeFailures
-                );
+                        protocolHandshakeFailures);
     }
 }
