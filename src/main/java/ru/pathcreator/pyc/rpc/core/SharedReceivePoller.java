@@ -190,6 +190,7 @@ final class SharedReceivePoller implements AutoCloseable {
 
     private static final class Lane implements AutoCloseable {
         private final CopyOnWriteArrayList<RpcChannel> channels = new CopyOnWriteArrayList<>();
+        private volatile RpcChannel[] channelSnapshot = new RpcChannel[0];
         private final AtomicBoolean running = new AtomicBoolean(true);
         private final int fragmentLimit;
         private final IdleStrategy idle;
@@ -208,11 +209,13 @@ final class SharedReceivePoller implements AutoCloseable {
 
         private void register(final RpcChannel channel) {
             channels.addIfAbsent(channel);
+            channelSnapshot = channels.toArray(RpcChannel[]::new);
             LockSupport.unpark(thread);
         }
 
         private void unregister(final RpcChannel channel) {
             channels.remove(channel);
+            channelSnapshot = channels.toArray(RpcChannel[]::new);
         }
 
         private int size() {
@@ -232,7 +235,8 @@ final class SharedReceivePoller implements AutoCloseable {
                     continue;
                 }
                 int fragments = 0;
-                for (final RpcChannel channel : channels) {
+                final RpcChannel[] snapshot = channelSnapshot;
+                for (final RpcChannel channel : snapshot) {
                     fragments += channel.pollRx(fragmentLimit);
                 }
                 idle.idle(fragments);
@@ -242,6 +246,7 @@ final class SharedReceivePoller implements AutoCloseable {
         @Override
         public void close() {
             running.set(false);
+            LockSupport.unpark(thread);
             try {
                 thread.join(2000);
             } catch (final InterruptedException ie) {

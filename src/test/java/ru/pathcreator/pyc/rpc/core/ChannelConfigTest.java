@@ -36,6 +36,9 @@ class ChannelConfigTest {
         assertEquals(IdleStrategyKind.YIELDING, config.rxIdleStrategy());
         assertFalse(config.isDirectExecutor());
         assertEquals(0, config.listeners().length);
+        assertTrue(config.offloadExecutionStatePoolingEnabled());
+        assertEquals(1024, config.offloadExecutionStatePoolSize());
+        assertEquals(128, config.offloadExecutionStatePoolGrowthChunk());
     }
 
     @Test

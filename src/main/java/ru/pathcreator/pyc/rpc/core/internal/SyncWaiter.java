@@ -61,21 +61,29 @@ public final class SyncWaiter {
      */
     public boolean await(final PendingCall call, final long timeoutNs) {
         for (int i = 0; i < spinLimit; i++) {
-            if (call.isCompleted()) return true;
+            if (call.isCompleted()) {
+                return true;
+            }
             Thread.onSpinWait();
         }
 
         final long deadline = System.nanoTime() + timeoutNs;
 
         for (int i = 0; i < yieldLimit; i++) {
-            if (call.isCompleted()) return true;
-            if (System.nanoTime() >= deadline) return call.isCompleted();
+            if (call.isCompleted()) {
+                return true;
+            }
+            if (System.nanoTime() >= deadline) {
+                return call.isCompleted();
+            }
             Thread.yield();
         }
 
         while (!call.isCompleted()) {
             final long remaining = deadline - System.nanoTime();
-            if (remaining <= 0) return call.isCompleted();
+            if (remaining <= 0) {
+                return call.isCompleted();
+            }
             LockSupport.parkNanos(Math.min(coldParkNs, remaining));
         }
         return true;

@@ -86,6 +86,9 @@ Effect:
 - safer receive path
 - slightly more moving parts
 - much better behavior when handlers are not tiny
+- virtual-thread offload is the current default-safe profile
+- repeated staging/claim/idle initialization in offload tasks is reduced by a
+  pooled per-channel execution-state cache
 
 ### `DIRECT`
 
@@ -337,6 +340,27 @@ Raise them when:
 
 Do not raise them blindly. Bigger pools also mean more retained memory.
 
+Additional offload-state pool settings:
+
+| Setting                               | Meaning                                               |
+|---------------------------------------|-------------------------------------------------------|
+| `offloadExecutionStatePoolingEnabled` | enable pooled offload execution state                 |
+| `offloadExecutionStatePoolSize`       | retained state objects per channel                    |
+| `offloadExecutionStatePoolGrowthChunk` | temporary growth when all retained state is busy     |
+
+These state objects hold reusable offload-path helpers such as staging buffers,
+`BufferClaim`, and idle strategy instances. This exists to avoid repeated
+virtual-thread first-touch overhead in `OFFLOAD` mode.
+
+Current defaults:
+
+- pooling enabled
+- retained size `1024` per channel
+- growth chunk `128`
+
+Extra overflow state is not retained after the spike passes. The channel keeps
+the retained base and lets temporary overflow objects fall out naturally.
+
 ## Payload Size
 
 Regular `RpcChannel` supports one message up to `16 MiB` total size.
@@ -385,6 +409,7 @@ Only if:
 - handlers never block
 - the code path is tiny
 - CPU burn is acceptable
+- you are intentionally trading safety for the smallest possible path
 
 ## How To Tune Safely
 

@@ -51,7 +51,7 @@ the business flow is naturally request/response.
 <dependency>
     <groupId>ru.pathcreator.pyc</groupId>
     <artifactId>rpc-core</artifactId>
-    <version>0.1.2</version>
+    <version>0.1.3</version>
 </dependency>
 </dependencies>
 ```
@@ -77,7 +77,7 @@ GitHub Packages requires authentication even for reads. Add a token with
 <dependency>
     <groupId>ru.pathcreator.pyc</groupId>
     <artifactId>rpc-core</artifactId>
-    <version>0.1.2</version>
+    <version>0.1.3</version>
 </dependency>
 </dependencies>
 ```
@@ -214,12 +214,16 @@ Important properties:
 - correlation safety is unchanged
 - one `Subscription` is never polled concurrently by multiple threads
 - empty RX lanes park instead of burning CPU
+- `OFFLOAD` reuses pooled per-channel execution state for staging, claim, and
+  idle helpers instead of repeatedly rebuilding that state on virtual-thread
+  tasks
 
 ## Recommended Starting Point
 
 For practical low-latency services with real handler work:
 
 - `OFFLOAD` handlers
+- virtual-thread offload is the default safe and general-purpose profile
 - `YIELDING` receive idle strategy
 - shared receive poller enabled
 - `sharedReceivePollerThreads(2)` as the first measurement point

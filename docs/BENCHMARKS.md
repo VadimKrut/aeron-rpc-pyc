@@ -56,6 +56,10 @@ It is closed-loop: one in-flight request per caller thread.
 | `--rx-poller-fragment-limit` | fragment limit per poll                                 |
 | `--burst-size`               | messages per pacing interval per caller thread          |
 | `--handler`                  | `DIRECT` or `OFFLOAD`                                   |
+| `--offload-executor`         | `VIRTUAL`, `FIXED`, or `CHANNEL_AFFINE` for `OFFLOAD`   |
+| `--offload-state-pool-enabled` | enable pooled offload execution state                 |
+| `--offload-state-pool-size`  | retained offload execution state objects per channel    |
+| `--offload-state-pool-growth-chunk` | temporary growth chunk when the pool is empty   |
 | `--idle`                     | `YIELDING`, `BUSY_SPIN`, or `BACKOFF`                   |
 | `--handler-io-nanos`         | artificial delay inside the server handler              |
 | `--handler-io-micros`        | same as above, in microseconds                          |
@@ -79,6 +83,14 @@ Important note for `--protocol-handshake`:
   handshake cost
 - this is intentional, because handshake is a startup or session concern, not a
   per-call concern
+
+Current benchmark defaults:
+
+- `handler=OFFLOAD`
+- `offload-executor=VIRTUAL`
+- `offload-state-pool-enabled=true`
+- `offload-state-pool-size=1024`
+- `offload-state-pool-growth-chunk=128`
 
 ## Recommended Starting Point
 
@@ -105,6 +117,9 @@ java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
 Why this profile:
 
 - `OFFLOAD` keeps user work off the receive path
+- `VIRTUAL` is the default safe and general-purpose offload model
+- pooled offload execution state removes most repeated virtual-thread
+  first-touch cost for staging, claim, and idle helpers
 - `YIELDING` is the most practical low-latency default
 - `burst-size=1` makes RTT comparison cleaner
 
@@ -312,6 +327,12 @@ Aeron does less work:
 - no codec dispatch
 - no response matching for blocking callers
 - no user handler abstraction
+
+Recent clean raw-vs-rpc-core runs also showed that a large part of the
+many-channel gap comes from the synchronous wait/wake path and the
+`OFFLOAD + VIRTUAL` handler path itself, not from the shared receive poller.
+`DIRECT` can be much closer to raw Aeron for tiny handlers, but it is not the
+safe default for handlers that may block.
 
 The useful comparison is not "why is RPC slower than raw Aeron".
 

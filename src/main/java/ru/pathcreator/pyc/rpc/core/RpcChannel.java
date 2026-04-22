@@ -16,7 +16,6 @@ import ru.pathcreator.pyc.rpc.core.internal.*;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -202,7 +201,9 @@ public final class RpcChannel implements AutoCloseable {
     // Offload infra
     private final int offloadCopyBufferSize;
     private final OffloadTask.Pool offloadTaskPool;
-    private final ConcurrentLinkedQueue<UnsafeBuffer> offloadCopyPool;
+    private final boolean offloadExecutionStatePoolingEnabled;
+    private final OffloadExecutionStatePool offloadExecutionStatePool;
+    private final ManyToManyConcurrentArrayQueue<UnsafeBuffer> offloadCopyPool;
 
     // Reusable BufferClaim для tryClaim. Разные caller-ы не могут шарить
     // один BufferClaim — каждому нужен свой. Используем ThreadLocal.
@@ -333,10 +334,17 @@ public final class RpcChannel implements AutoCloseable {
         this.txStaging = ThreadLocal.withInitial(() -> new UnsafeBuffer(ByteBuffer.allocateDirect(staging)));
         this.offloadTaskPool = new OffloadTask.Pool(config.offloadTaskPoolSize());
         this.offloadCopyBufferSize = config.offloadCopyBufferSize();
-        this.offloadCopyPool = new ConcurrentLinkedQueue<>();
+        this.offloadCopyPool = new ManyToManyConcurrentArrayQueue<>(config.offloadCopyPoolSize());
         for (int i = 0; i < config.offloadCopyPoolSize(); i++) {
             offloadCopyPool.offer(new UnsafeBuffer(ByteBuffer.allocateDirect(offloadCopyBufferSize)));
         }
+        this.offloadExecutionStatePoolingEnabled = config.offloadExecutionStatePoolingEnabled();
+        this.offloadExecutionStatePool = offloadExecutionStatePoolingEnabled
+                ? new OffloadExecutionStatePool(
+                config.offloadExecutionStatePoolSize(),
+                config.offloadExecutionStatePoolGrowthChunk(),
+                staging)
+                : null;
 
         // Rx
         this.rxAssembler = new FragmentAssembler(this::dispatch);
@@ -827,14 +835,24 @@ public final class RpcChannel implements AutoCloseable {
             final int length,
             final BackpressurePolicy policy
     ) {
+        publishBytes(src, offset, length, policy, null);
+    }
+
+    private void publishBytes(
+            final DirectBuffer src,
+            final int offset,
+            final int length,
+            final BackpressurePolicy policy,
+            final OffloadExecutionState executionState
+    ) {
         final long deadline = System.nanoTime() + offerTimeoutNs;
-        final IdleStrategy idle = txIdleTl.get();
+        final IdleStrategy idle = idleStrategy(executionState);
         idle.reset();
         final ConcurrentPublication publication = currentPublication();
         final int maxPayload = publication.maxPayloadLength();
         if (length <= maxPayload) {
             // tryClaim fast-path
-            final BufferClaim claim = bufferClaimTl.get();
+            final BufferClaim claim = bufferClaim(executionState);
             while (true) {
                 final long r = publication.tryClaim(length, claim);
                 if (r > 0) {
@@ -1098,7 +1116,7 @@ public final class RpcChannel implements AutoCloseable {
         if (directExecutor) {
             // Exec в rx-треде, без копирования и offload. Минимум latency.
             try {
-                invokeHandler(entry, messageTypeId, correlationId, buffer, payloadOffset, payloadLen);
+                invokeHandler(entry, messageTypeId, correlationId, buffer, payloadOffset, payloadLen, null);
             } finally {
                 inFlightHandlers.decrementAndGet();
             }
@@ -1109,21 +1127,23 @@ public final class RpcChannel implements AutoCloseable {
             // Защита: payload не влезает в offload-буфер. Exec inline
             // (потеряем latency rx но не сломаемся). В проде это worth warning.
             try {
-                invokeHandler(entry, messageTypeId, correlationId, buffer, payloadOffset, payloadLen);
+                invokeHandler(entry, messageTypeId, correlationId, buffer, payloadOffset, payloadLen, null);
             } finally {
                 inFlightHandlers.decrementAndGet();
             }
             return;
         }
         final UnsafeBuffer copy = acquireCopy();
+        final OffloadExecutionState executionState = acquireOffloadExecutionState();
         copy.putBytes(0, buffer, payloadOffset, payloadLen);
         final OffloadTask task = offloadTaskPool.acquire();
-        task.init(offloadBody, messageTypeId, correlationId, copy, payloadLen, entry, offloadTaskPool);
+        task.init(offloadBody, messageTypeId, correlationId, copy, payloadLen, entry, executionState, offloadTaskPool);
         try {
             offloadExecutor.execute(task);
         } catch (final RuntimeException e) {
             inFlightHandlers.decrementAndGet();
             releaseCopy(copy);
+            releaseOffloadExecutionState(executionState);
             throw e;
         }
     }
@@ -1136,13 +1156,16 @@ public final class RpcChannel implements AutoCloseable {
             final long correlationId,
             final UnsafeBuffer copy,
             final int length,
-            final Object entryObj
+            final Object entryObj,
+            final Object executionStateObj
     ) {
+        final OffloadExecutionState executionState = (OffloadExecutionState) executionStateObj;
         try {
-            invokeHandler((HandlerEntry) entryObj, messageTypeId, correlationId, copy, 0, length);
+            invokeHandler((HandlerEntry) entryObj, messageTypeId, correlationId, copy, 0, length, executionState);
         } finally {
             inFlightHandlers.decrementAndGet();
             releaseCopy(copy);
+            releaseOffloadExecutionState(executionState);
         }
     }
 
@@ -1152,14 +1175,17 @@ public final class RpcChannel implements AutoCloseable {
             final long correlationId,
             final DirectBuffer buffer,
             final int payloadOffset,
-            final int payloadLen
+            final int payloadLen,
+            final OffloadExecutionState executionState
     ) {
         try {
-            if (entry instanceof RawEntry raw) invokeRaw(raw, correlationId, buffer, payloadOffset, payloadLen);
-            else invokeHighLevel((HighLevelEntry) entry, correlationId, buffer, payloadOffset, payloadLen);
+            if (entry instanceof RawEntry raw)
+                invokeRaw(raw, correlationId, buffer, payloadOffset, payloadLen, executionState);
+            else
+                invokeHighLevel((HighLevelEntry) entry, correlationId, buffer, payloadOffset, payloadLen, executionState);
         } catch (final Throwable t) {
             LOGGER.log(Level.WARNING, "RPC handler failed", t);
-            tryPublishError(entry, correlationId, t);
+            tryPublishError(entry, correlationId, t, executionState);
         }
     }
 
@@ -1182,11 +1208,10 @@ public final class RpcChannel implements AutoCloseable {
             final long correlationId,
             final DirectBuffer buffer,
             final int payloadOffset,
-            final int payloadLen
+            final int payloadLen,
+            final OffloadExecutionState executionState
     ) {
-        // Serverside TX: staging из ThreadLocal (для handler-а который в
-        // rx-треде или в offload-треде — всё равно каждому свой).
-        UnsafeBuffer staging = txStaging.get();
+        UnsafeBuffer staging = stagingBuffer(executionState);
         final int responseOffset = Envelope.LENGTH;
         final int responseCapacity = staging.capacity() - responseOffset;
         final int written = entry.handler.handle(buffer, payloadOffset, payloadLen, staging, responseOffset, responseCapacity);
@@ -1195,7 +1220,7 @@ public final class RpcChannel implements AutoCloseable {
             throw new PayloadTooLargeException(Envelope.LENGTH + written, maxMessageSize);
         }
         EnvelopeCodec.encode(staging, 0, entry.responseMessageTypeId, correlationId, 0, written);
-        publishBytes(staging, 0, Envelope.LENGTH + written, BackpressurePolicy.BLOCK);
+        publishBytes(staging, 0, Envelope.LENGTH + written, BackpressurePolicy.BLOCK, executionState);
     }
 
     /**
@@ -1217,17 +1242,18 @@ public final class RpcChannel implements AutoCloseable {
             final long correlationId,
             final DirectBuffer buffer,
             final int payloadOffset,
-            final int payloadLen
+            final int payloadLen,
+            final OffloadExecutionState executionState
     ) {
         final Object req = entry.reqCodec.decode(buffer, payloadOffset, payloadLen);
         final Object resp = entry.handler.handle(req);
         if (resp == null) return;
-        UnsafeBuffer staging = txStaging.get();
+        UnsafeBuffer staging = stagingBuffer(executionState);
         int respLen;
         try {
             respLen = entry.respCodec.encode(resp, staging, Envelope.LENGTH);
         } catch (final IndexOutOfBoundsException ex) {
-            staging = ensureMaxSizedTxStaging();
+            staging = ensureMaxSizedTxStaging(executionState);
             respLen = entry.respCodec.encode(resp, staging, Envelope.LENGTH);
         }
         final int totalLen = Envelope.LENGTH + respLen;
@@ -1235,7 +1261,7 @@ public final class RpcChannel implements AutoCloseable {
             throw new PayloadTooLargeException(totalLen, maxMessageSize);
         }
         EnvelopeCodec.encode(staging, 0, entry.responseMessageTypeId, correlationId, 0, respLen);
-        publishBytes(staging, 0, totalLen, BackpressurePolicy.BLOCK);
+        publishBytes(staging, 0, totalLen, BackpressurePolicy.BLOCK, executionState);
     }
 
     /**
@@ -1332,6 +1358,13 @@ public final class RpcChannel implements AutoCloseable {
         return b != null ? b : new UnsafeBuffer(ByteBuffer.allocateDirect(offloadCopyBufferSize));
     }
 
+    private OffloadExecutionState acquireOffloadExecutionState() {
+        if (!offloadExecutionStatePoolingEnabled) {
+            return null;
+        }
+        return offloadExecutionStatePool.acquire();
+    }
+
     /**
      * Ensures that the current thread has a staging buffer large enough for
      * the configured channel maximum message size.
@@ -1343,6 +1376,17 @@ public final class RpcChannel implements AutoCloseable {
      * {@link ChannelConfig#maxMessageSize()}
      */
     private UnsafeBuffer ensureMaxSizedTxStaging() {
+        return ensureMaxSizedTxStaging(null);
+    }
+
+    private UnsafeBuffer ensureMaxSizedTxStaging(final OffloadExecutionState executionState) {
+        if (executionState != null) {
+            if (executionState.txStaging.capacity() >= maxMessageSize) {
+                return executionState.txStaging;
+            }
+            executionState.txStaging = new UnsafeBuffer(ByteBuffer.allocateDirect(maxMessageSize));
+            return executionState.txStaging;
+        }
         UnsafeBuffer staging = txStaging.get();
         if (staging.capacity() >= maxMessageSize) {
             return staging;
@@ -1350,6 +1394,18 @@ public final class RpcChannel implements AutoCloseable {
         staging = new UnsafeBuffer(ByteBuffer.allocateDirect(maxMessageSize));
         txStaging.set(staging);
         return staging;
+    }
+
+    private UnsafeBuffer stagingBuffer(final OffloadExecutionState executionState) {
+        return executionState != null ? executionState.txStaging : txStaging.get();
+    }
+
+    private IdleStrategy idleStrategy(final OffloadExecutionState executionState) {
+        return executionState != null ? executionState.txIdle : txIdleTl.get();
+    }
+
+    private BufferClaim bufferClaim(final OffloadExecutionState executionState) {
+        return executionState != null ? executionState.bufferClaim : bufferClaimTl.get();
     }
 
     /**
@@ -1361,14 +1417,26 @@ public final class RpcChannel implements AutoCloseable {
         offloadCopyPool.offer(b);
     }
 
-    private void tryPublishError(final HandlerEntry entry, final long correlationId, final Throwable failure) {
+    private void releaseOffloadExecutionState(final OffloadExecutionState state) {
+        if (!offloadExecutionStatePoolingEnabled || state == null) {
+            return;
+        }
+        offloadExecutionStatePool.release(state);
+    }
+
+    private void tryPublishError(
+            final HandlerEntry entry,
+            final long correlationId,
+            final Throwable failure,
+            final OffloadExecutionState executionState
+    ) {
         final RpcException error = mapRemoteError(failure);
         try {
-            final UnsafeBuffer staging = txStaging.get();
+            final UnsafeBuffer staging = stagingBuffer(executionState);
             final int payloadLen = encodeRemoteError(staging, Envelope.LENGTH, error);
             final int responseMessageTypeId = responseMessageTypeId(entry);
             EnvelopeCodec.encode(staging, 0, responseMessageTypeId, correlationId, Envelope.FLAG_IS_ERROR, payloadLen);
-            publishBytes(staging, 0, Envelope.LENGTH + payloadLen, BackpressurePolicy.BLOCK);
+            publishBytes(staging, 0, Envelope.LENGTH + payloadLen, BackpressurePolicy.BLOCK, executionState);
         } catch (final Throwable publishFailure) {
             LOGGER.log(Level.WARNING, "RPC error response publish failed", publishFailure);
         }
@@ -1419,6 +1487,62 @@ public final class RpcChannel implements AutoCloseable {
         }
         final String message = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
         return new RemoteRpcException(statusCode, message.isEmpty() ? "remote error" : message);
+    }
+
+    static final class OffloadExecutionState {
+        private UnsafeBuffer txStaging;
+        private final BufferClaim bufferClaim = new BufferClaim();
+        private final IdleStrategy txIdle = new YieldingIdleStrategy();
+
+        private OffloadExecutionState(final int stagingSize) {
+            this.txStaging = new UnsafeBuffer(ByteBuffer.allocateDirect(stagingSize));
+        }
+    }
+
+    static final class OffloadExecutionStatePool {
+        private final int retainedCapacity;
+        private final int growthChunk;
+        private final int stagingSize;
+        private final ManyToManyConcurrentArrayQueue<OffloadExecutionState> retained;
+
+        OffloadExecutionStatePool(final int retainedCapacity, final int growthChunk, final int stagingSize) {
+            this.retainedCapacity = Math.max(1, retainedCapacity);
+            this.growthChunk = Math.max(1, growthChunk);
+            this.stagingSize = stagingSize;
+            this.retained = new ManyToManyConcurrentArrayQueue<>(this.retainedCapacity);
+            for (int i = 0; i < this.retainedCapacity; i++) {
+                retained.offer(new OffloadExecutionState(stagingSize));
+            }
+        }
+
+        OffloadExecutionState acquire() {
+            final OffloadExecutionState pooled = retained.poll();
+            if (pooled != null) {
+                return pooled;
+            }
+            OffloadExecutionState first = null;
+            for (int i = 0; i < growthChunk; i++) {
+                final OffloadExecutionState state = new OffloadExecutionState(stagingSize);
+                if (first == null) {
+                    first = state;
+                } else if (!retained.offer(state)) {
+                    break;
+                }
+            }
+            return first;
+        }
+
+        void release(final OffloadExecutionState state) {
+            retained.offer(state);
+        }
+
+        int retainedCapacity() {
+            return retainedCapacity;
+        }
+
+        int approximateRetainedSize() {
+            return retained.size();
+        }
     }
 
     private void respondToProtocolHandshake(final long correlationId) {

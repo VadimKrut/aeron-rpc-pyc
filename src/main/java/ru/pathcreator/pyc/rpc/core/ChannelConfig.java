@@ -99,6 +99,9 @@ public final class ChannelConfig {
     private final int offloadTaskPoolSize;
     private final int offloadCopyPoolSize;
     private final int offloadCopyBufferSize;
+    private final boolean offloadExecutionStatePoolingEnabled;
+    private final int offloadExecutionStatePoolSize;
+    private final int offloadExecutionStatePoolGrowthChunk;
     private final ExecutorService offloadExecutor;
 
     private ChannelConfig(final Builder b) {
@@ -130,6 +133,9 @@ public final class ChannelConfig {
         this.offloadTaskPoolSize = b.offloadTaskPoolSize;
         this.offloadCopyPoolSize = b.offloadCopyPoolSize;
         this.offloadCopyBufferSize = b.offloadCopyBufferSize;
+        this.offloadExecutionStatePoolingEnabled = b.offloadExecutionStatePoolingEnabled;
+        this.offloadExecutionStatePoolSize = b.offloadExecutionStatePoolSize;
+        this.offloadExecutionStatePoolGrowthChunk = b.offloadExecutionStatePoolGrowthChunk;
     }
 
     /**
@@ -435,6 +441,36 @@ public final class ChannelConfig {
     }
 
     /**
+     * Returns whether pooled reusable execution state should be used for
+     * offloaded handlers.
+     *
+     * @return {@code true} when offload execution state pooling is enabled
+     */
+    public boolean offloadExecutionStatePoolingEnabled() {
+        return offloadExecutionStatePoolingEnabled;
+    }
+
+    /**
+     * Returns the number of reusable offload execution states retained per
+     * channel in the steady state.
+     *
+     * @return retained offload execution state pool size
+     */
+    public int offloadExecutionStatePoolSize() {
+        return offloadExecutionStatePoolSize;
+    }
+
+    /**
+     * Returns how many additional offload execution states should be created
+     * when the retained pool is temporarily exhausted.
+     *
+     * @return growth chunk for temporary pool expansion
+     */
+    public int offloadExecutionStatePoolGrowthChunk() {
+        return offloadExecutionStatePoolGrowthChunk;
+    }
+
+    /**
      * Проверяет, настроено ли выполнение обработчиков прямо в rx-потоке.
      *
      * <p>Checks whether handlers are configured to run directly in the receive thread.</p>
@@ -497,6 +533,9 @@ public final class ChannelConfig {
         private int offloadTaskPoolSize = 1024;
         private int offloadCopyPoolSize = 256;
         private int offloadCopyBufferSize = 8 * 1024;
+        private boolean offloadExecutionStatePoolingEnabled = true;
+        private int offloadExecutionStatePoolSize = 1024;
+        private int offloadExecutionStatePoolGrowthChunk = 128;
         private ExecutorService offloadExecutor = null;  // null = node default (virtual threads)
 
         /**
@@ -879,6 +918,42 @@ public final class ChannelConfig {
         }
 
         /**
+         * Enables or disables pooled reusable execution state for offloaded
+         * handler execution.
+         *
+         * @param v {@code true} to enable execution-state pooling
+         * @return this builder
+         */
+        public Builder offloadExecutionStatePoolingEnabled(final boolean v) {
+            this.offloadExecutionStatePoolingEnabled = v;
+            return this;
+        }
+
+        /**
+         * Sets the number of reusable offload execution states retained per
+         * channel in the steady state.
+         *
+         * @param v retained offload execution state pool size
+         * @return this builder
+         */
+        public Builder offloadExecutionStatePoolSize(final int v) {
+            this.offloadExecutionStatePoolSize = v;
+            return this;
+        }
+
+        /**
+         * Sets how many additional offload execution states are created when
+         * the retained pool is temporarily exhausted.
+         *
+         * @param v temporary growth chunk for the offload execution state pool
+         * @return this builder
+         */
+        public Builder offloadExecutionStatePoolGrowthChunk(final int v) {
+            this.offloadExecutionStatePoolGrowthChunk = v;
+            return this;
+        }
+
+        /**
          * Проверяет настройки и создает неизменяемую конфигурацию канала.
          *
          * <p>Validates settings and builds an immutable channel configuration.</p>
@@ -908,6 +983,14 @@ public final class ChannelConfig {
                 throw new IllegalArgumentException("protocolVersion >= 1");
             if (protocolHandshakeTimeout == null || protocolHandshakeTimeout.isZero() || protocolHandshakeTimeout.isNegative())
                 throw new IllegalArgumentException("protocolHandshakeTimeout must be positive");
+            if (offloadExecutionStatePoolSize < 0)
+                throw new IllegalArgumentException("offloadExecutionStatePoolSize must be >= 0");
+            if (offloadExecutionStatePoolGrowthChunk < 1)
+                throw new IllegalArgumentException("offloadExecutionStatePoolGrowthChunk must be >= 1");
+            if (!offloadExecutionStatePoolingEnabled && offloadExecutionStatePoolSize > 0)
+                throw new IllegalArgumentException("offloadExecutionStatePoolSize requires offloadExecutionStatePoolingEnabled=true");
+            if (!offloadExecutionStatePoolingEnabled && offloadExecutionStatePoolGrowthChunk != 1)
+                throw new IllegalArgumentException("offloadExecutionStatePoolGrowthChunk requires offloadExecutionStatePoolingEnabled=true");
             return new ChannelConfig(this);
         }
     }

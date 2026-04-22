@@ -19,11 +19,13 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -108,6 +110,7 @@ public final class RpcLatencyHistogramMain {
         out.printf(Locale.ROOT, "Target rate/thread:   %,.2f msg/s%n", options.rate / (double) options.threads);
         out.printf(Locale.ROOT, "Burst size/thread:    %,d%n", options.burstSize);
         out.printf(Locale.ROOT, "Handler mode:         %s%n", options.handlerMode);
+        out.printf(Locale.ROOT, "Offload executor:     %s%n", options.offloadExecutorMode);
         out.printf(Locale.ROOT, "Handler IO delay:     %,d ns%n", options.handlerIoNanos);
         out.printf(Locale.ROOT, "RX idle strategy:     %s%n", options.idleStrategy);
         out.printf(Locale.ROOT, "Protocol handshake:   %s%n", options.protocolHandshakeEnabled);
@@ -174,7 +177,11 @@ public final class RpcLatencyHistogramMain {
         }
     }
 
-    private static void printReport(final Options options, final Histogram histogram, final long elapsedNs) {
+    private static void printReport(
+            final Options options,
+            final Histogram histogram,
+            final long elapsedNs
+    ) {
         final double achievedRate = histogram.getTotalCount() / (elapsedNs / 1_000_000_000.0);
 
         System.out.println("Histogram of rpc-core RTT latencies in MICROSECONDS.");
@@ -311,13 +318,165 @@ public final class RpcLatencyHistogramMain {
         }
     }
 
+    private static final class BenchmarkOffloadThreadFactory implements java.util.concurrent.ThreadFactory {
+        private final AtomicInteger index = new AtomicInteger();
+
+        @Override
+        public Thread newThread(final Runnable task) {
+            final Thread thread = new Thread(task, "rpc-core-bench-offload-" + index.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        }
+    }
+
+    private static final class ChannelAffineExecutor extends AbstractExecutorService {
+        private final LinkedBlockingQueue<Runnable> queue = new LinkedBlockingQueue<>();
+        private final Thread worker;
+        private volatile boolean shutdown;
+
+        private ChannelAffineExecutor(final String threadName) {
+            this.worker = new Thread(this::runLoop, threadName);
+            this.worker.setDaemon(true);
+            this.worker.start();
+        }
+
+        @Override
+        public void shutdown() {
+            shutdown = true;
+            worker.interrupt();
+        }
+
+        @Override
+        public List<Runnable> shutdownNow() {
+            shutdown = true;
+            worker.interrupt();
+            final List<Runnable> drained = new ArrayList<>();
+            queue.drainTo(drained);
+            return drained;
+        }
+
+        @Override
+        public boolean isShutdown() {
+            return shutdown;
+        }
+
+        @Override
+        public boolean isTerminated() {
+            return shutdown && !worker.isAlive();
+        }
+
+        @Override
+        public boolean awaitTermination(final long timeout, final TimeUnit unit) throws InterruptedException {
+            worker.join(unit.toMillis(timeout));
+            return !worker.isAlive();
+        }
+
+        @Override
+        public void execute(final Runnable command) {
+            if (shutdown) {
+                throw new IllegalStateException("channel-affine executor is shut down");
+            }
+            queue.add(command);
+        }
+
+        private void runLoop() {
+            while (!shutdown || !queue.isEmpty()) {
+                final Runnable task;
+                try {
+                    task = queue.poll(100, TimeUnit.MILLISECONDS);
+                } catch (final InterruptedException ie) {
+                    if (shutdown) {
+                        break;
+                    }
+                    continue;
+                }
+                if (task != null) {
+                    task.run();
+                }
+            }
+        }
+    }
+
+    private static final class BenchmarkOffloadExecutors implements AutoCloseable {
+        private final ExecutorService shared;
+        private final ChannelAffineExecutor[] affine;
+
+        private BenchmarkOffloadExecutors(final ExecutorService shared, final ChannelAffineExecutor[] affine) {
+            this.shared = shared;
+            this.affine = affine;
+        }
+
+        private static BenchmarkOffloadExecutors create(final Options options) {
+            if (options.handlerMode != HandlerMode.OFFLOAD) {
+                return new BenchmarkOffloadExecutors(null, null);
+            }
+            return switch (options.offloadExecutorMode) {
+                case FIXED -> new BenchmarkOffloadExecutors(
+                        Executors.newFixedThreadPool(
+                                Math.max(1, Math.min(options.channels, Runtime.getRuntime().availableProcessors())),
+                                new BenchmarkOffloadThreadFactory()),
+                        null);
+                case CHANNEL_AFFINE -> {
+                    final int workers = Math.max(1, Math.min(options.channels, Runtime.getRuntime().availableProcessors()));
+                    final ChannelAffineExecutor[] executors = new ChannelAffineExecutor[workers];
+                    for (int i = 0; i < workers; i++) {
+                        executors[i] = new ChannelAffineExecutor("rpc-core-bench-affine-" + (i + 1));
+                    }
+                    yield new BenchmarkOffloadExecutors(null, executors);
+                }
+                case VIRTUAL -> new BenchmarkOffloadExecutors(null, null);
+            };
+        }
+
+        private ExecutorService forChannel(final int channelIndex) {
+            if (shared != null) {
+                return shared;
+            }
+            if (affine != null) {
+                return affine[Math.floorMod(channelIndex, affine.length)];
+            }
+            return null;
+        }
+
+        @Override
+        public void close() {
+            if (shared != null) {
+                shared.shutdown();
+                try {
+                    shared.awaitTermination(10, TimeUnit.SECONDS);
+                } catch (final InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            if (affine != null) {
+                for (final ChannelAffineExecutor executor : affine) {
+                    executor.shutdown();
+                }
+                for (final ChannelAffineExecutor executor : affine) {
+                    try {
+                        executor.awaitTermination(10, TimeUnit.SECONDS);
+                    } catch (final InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     private static final class BenchmarkContext implements AutoCloseable {
         private final RpcNode node;
         private final RpcChannel[] clients;
+        private final BenchmarkOffloadExecutors benchmarkOffloadExecutors;
 
-        private BenchmarkContext(final RpcNode node, final RpcChannel[] clients) {
+        private BenchmarkContext(
+                final RpcNode node,
+                final RpcChannel[] clients,
+                final BenchmarkOffloadExecutors benchmarkOffloadExecutors
+        ) {
             this.node = node;
             this.clients = clients;
+            this.benchmarkOffloadExecutors = benchmarkOffloadExecutors;
         }
 
         static BenchmarkContext start(final Options options) throws InterruptedException {
@@ -332,6 +491,7 @@ public final class RpcLatencyHistogramMain {
                     .sharedReceivePollerThreads(options.rxPollerThreads)
                     .sharedReceivePollerFragmentLimit(options.rxPollerFragmentLimit)
                     .build());
+            final BenchmarkOffloadExecutors benchmarkOffloadExecutors = BenchmarkOffloadExecutors.create(options);
 
             final int basePort = 30_000 + ThreadLocalRandom.current().nextInt(5_000);
             final int streamId = 2_001 + ThreadLocalRandom.current().nextInt(1_000);
@@ -344,12 +504,14 @@ public final class RpcLatencyHistogramMain {
                         "localhost:" + channelBasePort,
                         "localhost:" + (channelBasePort + 1),
                         streamId + i,
-                        options));
+                        options,
+                        benchmarkOffloadExecutors.forChannel(i)));
                 servers[i] = node.channel(config(
                         "localhost:" + (channelBasePort + 1),
                         "localhost:" + channelBasePort,
                         streamId + i,
-                        options));
+                        options,
+                        benchmarkOffloadExecutors.forChannel(i)));
                 servers[i].onRaw(REQUEST_TYPE, RESPONSE_TYPE, echoHandler(options));
             }
 
@@ -362,19 +524,21 @@ public final class RpcLatencyHistogramMain {
             waitConnected(clients, servers);
             primeOptionalFeatures(clients, options);
 
-            return new BenchmarkContext(node, clients);
+            return new BenchmarkContext(node, clients, benchmarkOffloadExecutors);
         }
 
         @Override
         public void close() {
             node.close();
+            benchmarkOffloadExecutors.close();
         }
 
         private static ChannelConfig config(
                 final String localEndpoint,
                 final String remoteEndpoint,
                 final int streamId,
-                final Options options
+                final Options options,
+                final ExecutorService benchmarkOffloadExecutor
         ) {
             final ChannelConfig.Builder builder = ChannelConfig.builder()
                     .localEndpoint(localEndpoint)
@@ -392,10 +556,15 @@ public final class RpcLatencyHistogramMain {
                     .registryInitialCapacity(65_536)
                     .offloadTaskPoolSize(65_536)
                     .offloadCopyPoolSize(8_192)
-                    .offloadCopyBufferSize(Math.max(8 * 1024, options.payloadSize));
+                    .offloadCopyBufferSize(Math.max(8 * 1024, options.payloadSize))
+                    .offloadExecutionStatePoolingEnabled(options.offloadExecutionStatePoolingEnabled)
+                    .offloadExecutionStatePoolSize(options.offloadExecutionStatePoolSize)
+                    .offloadExecutionStatePoolGrowthChunk(options.offloadExecutionStatePoolGrowthChunk);
 
             if (options.handlerMode == HandlerMode.DIRECT) {
                 builder.offloadExecutor(ChannelConfig.DIRECT_EXECUTOR);
+            } else if (benchmarkOffloadExecutor != null) {
+                builder.offloadExecutor(benchmarkOffloadExecutor);
             }
             if (options.listenersEnabled) {
                 builder.listener(BENCHMARK_LISTENER);
@@ -457,6 +626,12 @@ public final class RpcLatencyHistogramMain {
         OFFLOAD
     }
 
+    private enum OffloadExecutorMode {
+        VIRTUAL,
+        FIXED,
+        CHANNEL_AFFINE
+    }
+
     private static final class Options {
         private int payloadSize = 32;
         private int rate = 100_000;
@@ -472,7 +647,11 @@ public final class RpcLatencyHistogramMain {
         private int measurementMessages = 100_000;
         private long highestTrackableNs = TimeUnit.SECONDS.toNanos(60);
         private int significantDigits = 3;
-        private HandlerMode handlerMode = HandlerMode.DIRECT;
+        private HandlerMode handlerMode = HandlerMode.OFFLOAD;
+        private OffloadExecutorMode offloadExecutorMode = OffloadExecutorMode.VIRTUAL;
+        private boolean offloadExecutionStatePoolingEnabled = true;
+        private int offloadExecutionStatePoolSize = 1024;
+        private int offloadExecutionStatePoolGrowthChunk = 128;
         private IdleStrategyKind idleStrategy = IdleStrategyKind.YIELDING;
         private boolean protocolHandshakeEnabled = false;
         private boolean listenersEnabled = false;
@@ -506,6 +685,13 @@ public final class RpcLatencyHistogramMain {
                             options.highestTrackableNs = TimeUnit.MICROSECONDS.toNanos(Long.parseLong(value));
                     case "significant-digits" -> options.significantDigits = Integer.parseInt(value);
                     case "handler" -> options.handlerMode = HandlerMode.valueOf(value.toUpperCase(Locale.ROOT));
+                    case "offload-executor" ->
+                            options.offloadExecutorMode = OffloadExecutorMode.valueOf(value.toUpperCase(Locale.ROOT));
+                    case "offload-state-pool-enabled" ->
+                            options.offloadExecutionStatePoolingEnabled = Boolean.parseBoolean(value);
+                    case "offload-state-pool-size" -> options.offloadExecutionStatePoolSize = Integer.parseInt(value);
+                    case "offload-state-pool-growth-chunk" ->
+                            options.offloadExecutionStatePoolGrowthChunk = Integer.parseInt(value);
                     case "idle" -> options.idleStrategy = IdleStrategyKind.valueOf(value.toUpperCase(Locale.ROOT));
                     case "protocol-handshake" -> options.protocolHandshakeEnabled = Boolean.parseBoolean(value);
                     case "listeners" -> options.listenersEnabled = Boolean.parseBoolean(value);
@@ -561,10 +747,21 @@ public final class RpcLatencyHistogramMain {
             if (options.significantDigits < 1 || options.significantDigits > 5) {
                 throw new IllegalArgumentException("significant-digits must be between 1 and 5");
             }
+            if (options.offloadExecutionStatePoolSize < 0) {
+                throw new IllegalArgumentException("offload-state-pool-size must be zero or positive");
+            }
+            if (options.offloadExecutionStatePoolGrowthChunk <= 0) {
+                throw new IllegalArgumentException("offload-state-pool-growth-chunk must be positive");
+            }
+            if (!options.offloadExecutionStatePoolingEnabled && options.offloadExecutionStatePoolSize > 0) {
+                throw new IllegalArgumentException("offload-state-pool-size requires offload-state-pool-enabled=true");
+            }
         }
     }
 
     private static final class ByteArrayCodec implements MessageCodec<byte[]> {
+        private final ThreadLocal<byte[]> decodeBuffer = ThreadLocal.withInitial(() -> new byte[0]);
+
         @Override
         public int encode(final byte[] message, final MutableDirectBuffer buffer, final int offset) {
             buffer.putBytes(offset, message);
@@ -573,7 +770,11 @@ public final class RpcLatencyHistogramMain {
 
         @Override
         public byte[] decode(final DirectBuffer buffer, final int offset, final int length) {
-            final byte[] decoded = new byte[length];
+            byte[] decoded = decodeBuffer.get();
+            if (decoded.length < length) {
+                decoded = new byte[length];
+                decodeBuffer.set(decoded);
+            }
             buffer.getBytes(offset, decoded);
             return decoded;
         }

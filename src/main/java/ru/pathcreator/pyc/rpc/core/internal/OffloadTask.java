@@ -27,18 +27,20 @@ public final class OffloadTask implements Runnable {
          *
          * <p>Executes processing of one incoming request.</p>
          *
-         * @param messageTypeId идентификатор типа сообщения / message type identifier
-         * @param correlationId идентификатор корреляции запроса / request correlation identifier
-         * @param payloadCopy   копия payload для offload-потока / payload copy for the offload thread
-         * @param payloadLength длина payload в байтах / payload length in bytes
-         * @param handlerEntry  запись зарегистрированного обработчика / registered handler entry
+         * @param messageTypeId  идентификатор типа сообщения / message type identifier
+         * @param correlationId  идентификатор корреляции запроса / request correlation identifier
+         * @param payloadCopy    копия payload для offload-потока / payload copy for the offload thread
+         * @param payloadLength  длина payload в байтах / payload length in bytes
+         * @param handlerEntry   запись зарегистрированного обработчика / registered handler entry
+         * @param executionState reusable execution state for the task
          */
         void execute(
                 int messageTypeId,
                 long correlationId,
                 UnsafeBuffer payloadCopy,
                 int payloadLength,
-                Object handlerEntry
+                Object handlerEntry,
+                Object executionState
         );
     }
 
@@ -48,6 +50,7 @@ public final class OffloadTask implements Runnable {
     private int payloadLength;
     private long correlationId;
     private Object handlerEntry;
+    private Object executionState;
     private UnsafeBuffer payloadCopy;
 
     /**
@@ -68,13 +71,14 @@ public final class OffloadTask implements Runnable {
      *
      * <p>Initializes the task before it is submitted to an executor.</p>
      *
-     * @param body          callback выполнения / execution callback
-     * @param messageTypeId идентификатор типа сообщения / message type identifier
-     * @param correlationId идентификатор корреляции запроса / request correlation identifier
-     * @param payloadCopy   копия payload / payload copy
-     * @param payloadLength длина payload в байтах / payload length in bytes
-     * @param handlerEntry  запись обработчика / handler entry
-     * @param ownerPool     пул, в который вернуть задачу / pool to return the task to
+     * @param body           callback выполнения / execution callback
+     * @param messageTypeId  идентификатор типа сообщения / message type identifier
+     * @param correlationId  идентификатор корреляции запроса / request correlation identifier
+     * @param payloadCopy    копия payload / payload copy
+     * @param payloadLength  длина payload в байтах / payload length in bytes
+     * @param handlerEntry   запись обработчика / handler entry
+     * @param executionState reusable execution state for the task
+     * @param ownerPool      пул, в который вернуть задачу / pool to return the task to
      */
     public void init(
             final Body body,
@@ -83,6 +87,7 @@ public final class OffloadTask implements Runnable {
             final UnsafeBuffer payloadCopy,
             final int payloadLength,
             final Object handlerEntry,
+            final Object executionState,
             final Pool ownerPool
     ) {
         this.body = body;
@@ -91,6 +96,7 @@ public final class OffloadTask implements Runnable {
         this.payloadCopy = payloadCopy;
         this.payloadLength = payloadLength;
         this.handlerEntry = handlerEntry;
+        this.executionState = executionState;
         this.ownerPool = ownerPool;
     }
 
@@ -107,10 +113,11 @@ public final class OffloadTask implements Runnable {
         final long corrId = this.correlationId;
         final int len = this.payloadLength;
         final Object entry = this.handlerEntry;
+        final Object state = this.executionState;
         final Pool pool = this.ownerPool;
 
         try {
-            b.execute(msgTypeId, corrId, copy, len, entry);
+            b.execute(msgTypeId, corrId, copy, len, entry, state);
         } finally {
             reset();
             if (pool != null) pool.release(this);
@@ -124,6 +131,7 @@ public final class OffloadTask implements Runnable {
         this.payloadCopy = null;
         this.payloadLength = 0;
         this.handlerEntry = null;
+        this.executionState = null;
         this.ownerPool = null;
     }
 

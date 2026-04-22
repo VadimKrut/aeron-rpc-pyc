@@ -60,6 +60,10 @@ This is the safest practical default when handlers may do:
 - HTTP or gRPC calls
 - meaningful business logic
 
+The current default offload profile is virtual-thread based. The channel also
+keeps a pooled offload execution state so `OFFLOAD` does not repeatedly rebuild
+staging, claim, and idle helpers on each virtual-thread task.
+
 ### Use `DIRECT` only for tiny handlers
 
 Use `DIRECT_EXECUTOR` only when:
@@ -68,7 +72,9 @@ Use `DIRECT_EXECUTOR` only when:
 - it never blocks
 - you are intentionally chasing the smallest possible path
 
-Remember that a slow direct handler blocks receive progress.
+Remember that a slow direct handler blocks receive progress. `DIRECT` may look
+much better in tiny echo-style benchmarks, but it is not the safe general
+default for real handler I/O.
 
 ## 5. Reconnect Modes
 
